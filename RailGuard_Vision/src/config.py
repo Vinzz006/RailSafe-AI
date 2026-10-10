@@ -1,0 +1,179 @@
+"""Configuration loader and schema definitions for RailGuard Vision."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+import yaml
+
+
+@dataclass
+class AppConfig:
+    name: str = "RailGuard Vision"
+    version: str = "1.0.0"
+    institution: str = "Indian Railways Surveillance & Security Assistance Prototype"
+    disclaimer: str = (
+        "FOR HUMAN REVIEW ONLY — Does not detect explosives, chemical substances, or narcotics."
+    )
+
+
+@dataclass
+class VideoConfig:
+    source: Union[int, str] = 0
+    camera_id: str = "CAM-PLATFORM-01"
+    target_width: int = 640
+    target_height: int = 480
+    frame_skip: int = 1
+    buffer_seconds: float = 10.0
+
+
+@dataclass
+class ModelConfig:
+    weights: str = "yolov8n.pt"
+    confidence_threshold: float = 0.35
+    iou_threshold: float = 0.45
+    device: str = "cpu"
+    input_size: int = 640
+
+
+@dataclass
+class RulesConfig:
+    stationary_pixels: float = 18.0
+    stationary_window_seconds: float = 5.0
+    proximity_pixels: float = 140.0
+    warning_seconds: float = 4.0
+    unattended_seconds: float = 15.0
+    track_drop_grace_seconds: float = 2.5
+    owner_left_grace_seconds: float = 8.0
+    loiter_seconds: float = 90.0
+    restricted_zone_enabled: bool = False
+    restricted_zone_polygon: List[List[int]] = field(
+        default_factory=lambda: [[20, 20], [300, 20], [300, 200], [20, 200]]
+    )
+    bag_classes: List[str] = field(
+        default_factory=lambda: ["backpack", "handbag", "suitcase"]
+    )
+    person_class: str = "person"
+
+
+@dataclass
+class StorageConfig:
+    db_path: str = "data/security_alerts.db"
+    alerts_dir: str = "data/alerts"
+    clips_dir: str = "data/clips"
+    pre_alert_seconds: float = 5.0
+    post_alert_seconds: float = 5.0
+
+
+@dataclass
+class EvaluationConfig:
+    ground_truth_path: str = "data/ground_truth/ground_truth_template.csv"
+    time_tolerance_seconds: float = 4.0
+
+
+@dataclass
+class SystemConfig:
+    app: AppConfig = field(default_factory=AppConfig)
+    video: VideoConfig = field(default_factory=VideoConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    rules: RulesConfig = field(default_factory=RulesConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+
+    def validate(self) -> None:
+        """Validate config parameters for physical and numerical sanity."""
+        if self.video.target_width <= 0 or self.video.target_height <= 0:
+            raise ValueError(f"Invalid video dimensions: {self.video.target_width}x{self.video.target_height}")
+        if self.video.frame_skip < 1:
+            raise ValueError(f"frame_skip must be >= 1, got {self.video.frame_skip}")
+        if not (0.0 < self.model.confidence_threshold <= 1.0):
+            raise ValueError(f"confidence_threshold must be in (0, 1], got {self.model.confidence_threshold}")
+        if self.rules.stationary_pixels <= 0:
+            raise ValueError("stationary_pixels must be > 0")
+        if self.rules.proximity_pixels <= 0:
+            raise ValueError("proximity_pixels must be > 0")
+        if self.rules.warning_seconds >= self.rules.unattended_seconds:
+            raise ValueError(
+                f"warning_seconds ({self.rules.warning_seconds}) must be < unattended_seconds ({self.rules.unattended_seconds})"
+            )
+
+
+def find_default_config_path() -> Optional[Path]:
+    """Locate config.yaml across expected relative paths."""
+    candidates = [
+        Path("configs/config.yaml"),
+        Path("RailGuard_Vision/configs/config.yaml"),
+        Path(__file__).resolve().parent.parent / "configs" / "config.yaml",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c.resolve()
+    return None
+
+
+def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
+    """Load system configuration from YAML file with environment variable overrides."""
+    resolved_path: Optional[Path] = None
+    if config_path is not None:
+        p = Path(config_path)
+        if p.is_file():
+            resolved_path = p.resolve()
+    else:
+        resolved_path = find_default_config_path()
+
+    raw: Dict[str, Any] = {}
+    if resolved_path and resolved_path.is_file():
+        try:
+            with open(resolved_path, "r", encoding="utf-8") as f:
+                content = yaml.safe_load(f)
+                if isinstance(content, dict):
+                    raw = content
+        except Exception as e:
+            # Fall back to defaults if parsing fails
+            raw = {}
+
+    app_data = raw.get("app", {})
+    video_data = raw.get("video", {})
+    model_data = raw.get("model", {})
+    rules_data = raw.get("rules", {})
+    storage_data = raw.get("storage", {})
+    eval_data = raw.get("evaluation", {})
+
+    # Environment variable overrides
+    env_source = os.getenv("RAILGUARD_VIDEO_SOURCE")
+    if env_source is not None:
+        if env_source.isdigit():
+            video_data["source"] = int(env_source)
+        else:
+            video_data["source"] = env_source
+
+    env_cam_id = os.getenv("RAILGUARD_CAMERA_ID")
+    if env_cam_id:
+        video_data["camera_id"] = env_cam_id
+
+    env_weights = os.getenv("RAILGUARD_MODEL_WEIGHTS")
+    if env_weights:
+        model_data["weights"] = env_weights
+
+    env_db = os.getenv("RAILGUARD_DB_PATH")
+    if env_db:
+        storage_data["db_path"] = env_db
+
+    # Video source type conversion
+    src_val = video_data.get("source", 0)
+    if isinstance(src_val, str) and src_val.isdigit():
+        video_data["source"] = int(src_val)
+
+    cfg = SystemConfig(
+        app=AppConfig(**app_data),
+        video=VideoConfig(**video_data),
+        model=ModelConfig(**model_data),
+        rules=RulesConfig(**rules_data),
+        storage=StorageConfig(**storage_data),
+        evaluation=EvaluationConfig(**eval_data),
+    )
+    cfg.validate()
+    return cfg
