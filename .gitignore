@@ -53,3 +53,9 @@ railway_luggage_detection/logs/*.db
 railway_luggage_detection/logs/*.csv
 railway_luggage_detection/snapshots/*
 !railway_luggage_detection/snapshots/.gitkeep
+
+# Environment and Secret Files
+.env
+.env.*
+*.env
+
