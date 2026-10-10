@@ -25,6 +25,7 @@ class AlertRecord:
     review_status: str  # 'unreviewed', 'verified', 'false_alarm'
     cleared_timestamp: Optional[str] = None
     created_at: Optional[str] = None
+    event_uid: Optional[str] = None
 
 
 class AlertDatabaseManager:
@@ -45,13 +46,14 @@ class AlertDatabaseManager:
             conn.close()
 
     def init_db(self) -> None:
-        """Create database schema if not present."""
+        """Create database schema if not present and run non-destructive migration."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS alerts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_uid TEXT,
                     timestamp TEXT NOT NULL,
                     camera_id TEXT NOT NULL,
                     track_id INTEGER NOT NULL,
@@ -66,6 +68,12 @@ class AlertDatabaseManager:
                 );
                 """
             )
+            # Non-destructive migration for existing databases
+            cursor.execute("PRAGMA table_info(alerts);")
+            columns = [col["name"] for col in cursor.fetchall()]
+            if "event_uid" not in columns:
+                cursor.execute("ALTER TABLE alerts ADD COLUMN event_uid TEXT;")
+
             cursor.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_alerts_camera_track
@@ -78,7 +86,31 @@ class AlertDatabaseManager:
                 ON alerts(review_status);
                 """
             )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_event_uid
+                ON alerts(event_uid) WHERE event_uid IS NOT NULL;
+                """
+            )
             conn.commit()
+
+    def _row_to_record(self, r: sqlite3.Row) -> AlertRecord:
+        keys = r.keys()
+        return AlertRecord(
+            id=r["id"],
+            timestamp=r["timestamp"],
+            camera_id=r["camera_id"],
+            track_id=r["track_id"],
+            object_class=r["object_class"],
+            event_duration=r["event_duration"],
+            reason=r["reason"],
+            snapshot_path=r["snapshot_path"],
+            clip_path=r["clip_path"],
+            review_status=r["review_status"],
+            cleared_timestamp=r["cleared_timestamp"],
+            created_at=r["created_at"],
+            event_uid=r["event_uid"] if "event_uid" in keys else None,
+        )
 
     def insert_alert(
         self,
@@ -92,19 +124,31 @@ class AlertDatabaseManager:
         clip_path: Optional[str] = None,
         review_status: str = "unreviewed",
         cleared_timestamp: Optional[str] = None,
+        event_uid: Optional[str] = None,
     ) -> int:
-        """Insert a newly raised alert into SQLite using parameterized query."""
+        """Insert a newly raised alert into SQLite using parameterized query.
+        
+        If event_uid is provided and already exists, returns the existing record id
+        without creating duplicate rows (idempotency).
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            if event_uid:
+                cursor.execute("SELECT id FROM alerts WHERE event_uid = ?;", (event_uid,))
+                row = cursor.fetchone()
+                if row:
+                    return int(row["id"])
+
             cursor.execute(
                 """
                 INSERT INTO alerts (
-                    timestamp, camera_id, track_id, object_class,
+                    event_uid, timestamp, camera_id, track_id, object_class,
                     event_duration, reason, snapshot_path, clip_path,
                     review_status, cleared_timestamp
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
+                    event_uid,
                     timestamp,
                     camera_id,
                     track_id,
@@ -180,25 +224,7 @@ class AlertDatabaseManager:
                 )
             rows = cursor.fetchall()
 
-        records: List[AlertRecord] = []
-        for r in rows:
-            records.append(
-                AlertRecord(
-                    id=r["id"],
-                    timestamp=r["timestamp"],
-                    camera_id=r["camera_id"],
-                    track_id=r["track_id"],
-                    object_class=r["object_class"],
-                    event_duration=r["event_duration"],
-                    reason=r["reason"],
-                    snapshot_path=r["snapshot_path"],
-                    clip_path=r["clip_path"],
-                    review_status=r["review_status"],
-                    cleared_timestamp=r["cleared_timestamp"],
-                    created_at=r["created_at"],
-                )
-            )
-        return records
+        return [self._row_to_record(r) for r in rows]
 
     def get_alert_by_id(self, alert_id: int) -> Optional[AlertRecord]:
         """Retrieve single alert by ID."""
@@ -208,20 +234,17 @@ class AlertDatabaseManager:
             row = cursor.fetchone()
             if not row:
                 return None
-            return AlertRecord(
-                id=row["id"],
-                timestamp=row["timestamp"],
-                camera_id=row["camera_id"],
-                track_id=row["track_id"],
-                object_class=row["object_class"],
-                event_duration=row["event_duration"],
-                reason=row["reason"],
-                snapshot_path=row["snapshot_path"],
-                clip_path=row["clip_path"],
-                review_status=row["review_status"],
-                cleared_timestamp=row["cleared_timestamp"],
-                created_at=row["created_at"],
-            )
+            return self._row_to_record(row)
+
+    def get_alert_by_uid(self, event_uid: str) -> Optional[AlertRecord]:
+        """Retrieve single alert by unique event UID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM alerts WHERE event_uid = ?;", (event_uid,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return self._row_to_record(row)
 
     def get_false_alarm_rate(self) -> Tuple[Optional[float], int, int]:
         """Calculate false alarm rate from operator reviews.

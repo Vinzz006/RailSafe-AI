@@ -164,16 +164,45 @@ export RAILGUARD_VIDEO_SOURCE="rtsp://admin:password@10.0.0.15:554/stream1"
 
 ---
 
-## 7. Automated Test Suite
+## 7. Render Cloud Deployment & Edge Ingestion
+
+RailGuard Vision supports distributed deployment: the station laptop runs optical computer vision locally, uploading authenticated alerts and evidence to a Render-hosted cloud backend for the Flutter mobile application.
+
+```mermaid
+flowchart LR
+    Webcam["Station Laptop\n(YOLOv8 + ByteTrack)"] -->|Outbound HTTPS\nPOST /api/ingest/alerts| Render["Render Cloud Backend\n(FastAPI + /var/data)"]
+    Render -->|HTTPS / WSS| Flutter["Flutter Mobile App\n(RPF Field Officer)"]
+```
+
+### 1. Launch Cloud Backend (Render)
+- Deploy using `render.yaml` or Render Dashboard.
+- Mount persistent disk at `/var/data` (holds SQLite database and evidence files).
+- Start command: `uvicorn app.api:app --host 0.0.0.0 --port $PORT`
+- Full instructions: [`RENDER_DEPLOYMENT.md`](file:///c:/Users/shanm/Downloads/RailSafe%20AI/RailGuard_Vision/RENDER_DEPLOYMENT.md)
+
+### 2. Launch Local Laptop Detection Agent
+On the station laptop connected to the webcam:
+```cmd
+cd RailGuard_Vision
+set RAILGUARD_CLOUD_URL=https://railguard-vision-api.onrender.com
+set RAILGUARD_AGENT_TOKEN=your-agent-token
+run_agent.bat
+```
+
+### 3. Flutter Mobile App Client
+The Flutter mobile application connects via [`RailGuardApiService`](file:///c:/Users/shanm/Downloads/RailSafe%20AI/lib/services/railguard_api_service.dart), fetching live alerts, reviewing events as `verified` or `false_alarm`, and streaming evidence snapshots and video clips securely over HTTPS.
+
+---
+
+## 8. Automated Test Suite
 
 Run the complete test suite:
 ```bash
-python -m pytest -q
+python -m pytest -v
 ```
 Expected output:
 ```text
-.........................                                                [100%]
-25 passed in 1.40s
+======================== 37 passed, 1 warning in 4.46s ========================
 ```
 
 Test coverage includes:
@@ -183,10 +212,13 @@ Test coverage includes:
 - `test_alerts.py`: Evidence saving (snapshots & MP4 clips) and duplicate alert suppression.
 - `test_db.py`: SQLite operations, review updates, and false-alarm calculations.
 - `test_evaluation.py`: Precision, recall, detection delay, and non-double-counting policy.
+- `test_api.py`: FastAPI health checks, authentication, alert ingestion, idempotency, review updates, evidence streaming, and path traversal guards.
+- `test_persistence.py`: Simulated restart across persistent directories, ensuring zero data loss.
+- `test_cloud_agent.py`: Asynchronous edge forwarder, queue overflow protection, and bounded retry logic.
 
 ---
 
-## 8. Evaluation Framework (`evaluate.py`)
+## 9. Evaluation Framework (`evaluate.py`)
 
 Run benchmark comparisons between annotated ground truth scenarios and logged alerts:
 ```bash
@@ -201,20 +233,21 @@ Calculates and reports:
 
 ---
 
-## 9. Ethics, Privacy & Responsible AI Safeguards
+## 10. Ethics, Privacy & Responsible AI Safeguards
 
 1. **No Facial Recognition or Biometrics:** The system does not perform face detection, facial recognition, or biometric identification.
 2. **No Demographic Inference:** Passengers are detected only under the general COCO `person` class. No age, gender, ethnicity, or appearance profiling is implemented.
 3. **Temporary Tracking Identifiers:** Track IDs (e.g., Track #42) are discarded as soon as a person or object leaves the frame.
 4. **Contextual Loitering Interpretation:** Indian Railway stations routinely experience delayed trains and resting commuters. Dwell time is treated as noisy context, never proof of malicious intent.
-5. **Data Protection:** Evidence snapshots and clips are stored locally under `data/alerts` and `data/clips`. Access must be restricted to authorized railway personnel. Operators should establish a 30-day data retention and secure deletion procedure in compliance with Indian IT and Railway Board security policies.
+5. **Data Protection:** Evidence snapshots and clips are stored locally under `data/alerts` and `data/clips` (or `/var/data` in the cloud). Access must be restricted to authorized railway personnel. Operators should establish a 30-day data retention and secure deletion procedure in compliance with Indian IT and Railway Board security policies.
 
 ---
 
-## 10. Future Work & Deployment Roadmap
+## 11. Future Work & Deployment Roadmap
 
 - **NVIDIA Jetson Edge Deployment:** Porting YOLOv8 to TensorRT for 30+ FPS low-latency edge acceleration on station platforms.
 - **Homography Ground-Plane Calibration:** Calibrating camera perspective matrices to measure physical distance in meters rather than image pixels.
 - **Automated Privacy Blurring:** Applying Gaussian blur to bystander faces prior to saving evidence snapshots.
 - **RPF Control Room Integration:** Secure webhook and MQTT alerts dispatched directly to station security monitors and hand-held terminals.
 - **Verified Automatic Retention Purging:** Automated daemon purging snapshots older than the configured compliance retention window.
+

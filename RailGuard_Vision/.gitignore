@@ -1,0 +1,41 @@
+# Python bytecode & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets & Environment
+.env
+.env.*
+*.env
+
+# SQLite Databases & Local Logs
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/security_alerts.db
+
+# Alert Evidence Snapshots and Context Video Clips
+data/alerts/*
+!data/alerts/.gitkeep
+data/clips/*
+!data/clips/.gitkeep
+
+# Heavy Model Weights
+*.pt
+*.engine
+*.onnx
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

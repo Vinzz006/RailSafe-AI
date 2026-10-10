@@ -66,6 +66,15 @@ class StorageConfig:
     clips_dir: str = "data/clips"
     pre_alert_seconds: float = 5.0
     post_alert_seconds: float = 5.0
+    data_dir: Optional[str] = None
+
+
+@dataclass
+class SecurityConfig:
+    api_token: str = "dev-railguard-token-change-in-production"
+    agent_token: str = "dev-agent-token-change-in-production"
+    max_upload_bytes: int = 30 * 1024 * 1024  # 30 MB
+    rate_limit_per_minute: int = 120
 
 
 @dataclass
@@ -81,6 +90,7 @@ class SystemConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     rules: RulesConfig = field(default_factory=RulesConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
     def validate(self) -> None:
@@ -103,6 +113,12 @@ class SystemConfig:
 
 def find_default_config_path() -> Optional[Path]:
     """Locate config.yaml across expected relative paths."""
+    env_config = os.getenv("RAILGUARD_CONFIG")
+    if env_config:
+        p = Path(env_config)
+        if p.is_file():
+            return p.resolve()
+
     candidates = [
         Path("configs/config.yaml"),
         Path("RailGuard_Vision/configs/config.yaml"),
@@ -131,8 +147,7 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
                 content = yaml.safe_load(f)
                 if isinstance(content, dict):
                     raw = content
-        except Exception as e:
-            # Fall back to defaults if parsing fails
+        except Exception:
             raw = {}
 
     app_data = raw.get("app", {})
@@ -140,9 +155,21 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
     model_data = raw.get("model", {})
     rules_data = raw.get("rules", {})
     storage_data = raw.get("storage", {})
+    security_data = raw.get("security", {})
     eval_data = raw.get("evaluation", {})
 
     # Environment variable overrides
+    env_data_dir = os.getenv("RAILGUARD_DATA_DIR")
+    if env_data_dir:
+        storage_data["data_dir"] = env_data_dir
+        # Standardize default subpaths under persistent data_dir unless specific env vars set
+        if not os.getenv("RAILGUARD_DB_PATH"):
+            storage_data["db_path"] = str(Path(env_data_dir) / "security_alerts.db")
+        if not os.getenv("RAILGUARD_ALERTS_DIR"):
+            storage_data["alerts_dir"] = str(Path(env_data_dir) / "alerts")
+        if not os.getenv("RAILGUARD_CLIPS_DIR"):
+            storage_data["clips_dir"] = str(Path(env_data_dir) / "clips")
+
     env_source = os.getenv("RAILGUARD_VIDEO_SOURCE")
     if env_source is not None:
         if env_source.isdigit():
@@ -162,6 +189,22 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
     if env_db:
         storage_data["db_path"] = env_db
 
+    env_alerts_dir = os.getenv("RAILGUARD_ALERTS_DIR")
+    if env_alerts_dir:
+        storage_data["alerts_dir"] = env_alerts_dir
+
+    env_clips_dir = os.getenv("RAILGUARD_CLIPS_DIR")
+    if env_clips_dir:
+        storage_data["clips_dir"] = env_clips_dir
+
+    env_api_token = os.getenv("RAILGUARD_API_TOKEN")
+    if env_api_token:
+        security_data["api_token"] = env_api_token
+
+    env_agent_token = os.getenv("RAILGUARD_AGENT_TOKEN")
+    if env_agent_token:
+        security_data["agent_token"] = env_agent_token
+
     # Video source type conversion
     src_val = video_data.get("source", 0)
     if isinstance(src_val, str) and src_val.isdigit():
@@ -173,6 +216,7 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
         model=ModelConfig(**model_data),
         rules=RulesConfig(**rules_data),
         storage=StorageConfig(**storage_data),
+        security=SecurityConfig(**security_data),
         evaluation=EvaluationConfig(**eval_data),
     )
     cfg.validate()

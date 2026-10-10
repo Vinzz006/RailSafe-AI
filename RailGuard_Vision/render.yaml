@@ -1,0 +1,32 @@
+# Render Blueprint configuration for RailGuard Vision
+# Documentation: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: railguard-vision-api
+    runtime: python
+    region: oregon # or singapore / frankfurt
+    plan: starter # Starter plan or higher is required for Render persistent disks
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: railguard-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.13
+      - key: RAILGUARD_DATA_DIR
+        value: /var/data
+      - key: RAILGUARD_DB_PATH
+        value: /var/data/security_alerts.db
+      - key: RAILGUARD_ALERTS_DIR
+        value: /var/data/alerts
+      - key: RAILGUARD_CLIPS_DIR
+        value: /var/data/clips
+      - key: RAILGUARD_API_TOKEN
+        generateValue: true
+      - key: RAILGUARD_AGENT_TOKEN
+        generateValue: true
