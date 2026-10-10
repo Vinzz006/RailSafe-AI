@@ -25,6 +25,7 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Request,
     Security,
     UploadFile,
     WebSocket,
@@ -145,14 +146,66 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enable CORS for Flutter mobile integration
+# Determine allowed CORS origins from security configuration
+cors_origins: List[str] = config.security.cors_allowed_origins
+logger.info("Configured CORS allowed origins: %s", cors_origins)
+
+# Enable secure CORS middleware for Flutter web and mobile
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers",
+    ],
+    expose_headers=["Content-Length", "Content-Disposition"],
+    max_age=86400,
 )
+
+
+def _apply_cors_headers(headers: Dict[str, str], request: Request) -> None:
+    """Ensure permitted origins receive CORS headers even on error responses."""
+    origin = request.headers.get("origin")
+    if origin and (origin in cors_origins or "*" in cors_origins):
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, PUT, DELETE, OPTIONS"
+        headers["Access-Control-Allow-Headers"] = (
+            "Authorization, Content-Type, Accept, Origin, X-Requested-With, "
+            "Access-Control-Request-Method, Access-Control-Request-Headers"
+        )
+
+
+@app.exception_handler(HTTPException)
+async def custom_http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Ensure HTTP exceptions (401, 403, 404, 500) include proper CORS headers."""
+    headers = dict(exc.headers or {})
+    _apply_cors_headers(headers, request)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=headers,
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch unhandled server exceptions, log safely, and return 500 with CORS headers."""
+    logger.exception("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc)
+    headers: Dict[str, str] = {}
+    _apply_cors_headers(headers, request)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "An internal server error occurred. Check server logs for details."},
+        headers=headers,
+    )
 
 
 # ============================================================================
@@ -271,18 +324,34 @@ def serialize_firestore_alert(doc_data: Dict[str, Any]) -> AlertResponse:
     snap_url = doc_data.get("snapshot_url") or f"/api/alerts/{doc_id}/snapshot"
     clip_url = doc_data.get("clip_url") or (f"/api/alerts/{doc_id}/clip" if doc_data.get("clip_key") else None)
 
+    track_id_raw = doc_data.get("track_id")
+    track_id = 0
+    if track_id_raw is not None:
+        try:
+            track_id = int(track_id_raw)
+        except (ValueError, TypeError):
+            track_id = 0
+
+    duration_raw = doc_data.get("event_duration")
+    duration = 0.0
+    if duration_raw is not None:
+        try:
+            duration = float(duration_raw)
+        except (ValueError, TypeError):
+            duration = 0.0
+
     return AlertResponse(
         id=doc_id,
-        event_uid=doc_data.get("event_uid", str(doc_id)),
-        timestamp=doc_data.get("timestamp", ""),
-        camera_id=doc_data.get("camera_id", "CAM-01"),
-        track_id=int(doc_data.get("track_id", 0)),
-        object_class=doc_data.get("object_class", "luggage"),
-        event_duration=float(doc_data.get("event_duration", 0.0)),
-        reason=doc_data.get("reason", "Unattended luggage detected"),
+        event_uid=str(doc_data.get("event_uid") or doc_id),
+        timestamp=str(doc_data.get("timestamp") or ""),
+        camera_id=str(doc_data.get("camera_id") or "CAM-01"),
+        track_id=track_id,
+        object_class=str(doc_data.get("object_class") or "luggage"),
+        event_duration=duration,
+        reason=str(doc_data.get("reason") or "Unattended luggage detected"),
         snapshot_url=snap_url,
         clip_url=clip_url,
-        review_status=doc_data.get("review_status", "unreviewed"),
+        review_status=str(doc_data.get("review_status") or "unreviewed"),
         reviewed_by=doc_data.get("reviewed_by"),
         reviewed_at=doc_data.get("reviewed_at"),
         cleared_timestamp=doc_data.get("cleared_timestamp"),
@@ -524,8 +593,25 @@ def get_alerts(
     repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> List[AlertResponse]:
     """Retrieve security alerts from Cloud Firestore."""
-    docs = repo.list_alerts(limit=limit, review_status=status_filter, unreviewed_only=unreviewed_only)
-    return [serialize_firestore_alert(d) for d in docs]
+    if status_filter and status_filter.lower() in ("all", ""):
+        status_filter = None
+    elif status_filter and status_filter not in ("verified", "false_alarm", "unreviewed"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid status filter '{status_filter}'. Supported values: 'verified', 'false_alarm', 'unreviewed'.",
+        )
+
+    try:
+        docs = repo.list_alerts(limit=limit, review_status=status_filter, unreviewed_only=unreviewed_only)
+        return [serialize_firestore_alert(d) for d in docs]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to query alerts from Firestore in /api/alerts: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve alerts from persistence layer.",
+        )
 
 
 @app.get("/api/alerts/{alert_id}", tags=["Alerts"], response_model=AlertResponse)

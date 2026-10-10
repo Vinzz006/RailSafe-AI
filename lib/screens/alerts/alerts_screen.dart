@@ -25,6 +25,9 @@ class _AlertsScreenState extends State<AlertsScreen> with SingleTickerProviderSt
   String? _visionError;
   String _selectedFilter = 'all'; // 'all', 'unreviewed', 'verified', 'false_alarm'
 
+  RailGuardApiException? _visionApiException;
+  bool _hasSuccessfulLoad = false;
+
   @override
   void initState() {
     super.initState();
@@ -43,10 +46,12 @@ class _AlertsScreenState extends State<AlertsScreen> with SingleTickerProviderSt
   }
 
   Future<void> _loadVisionAlerts() async {
+    if (_isLoadingVision) return;
     final apiService = Provider.of<RailGuardApiService>(context, listen: false);
     setState(() {
       _isLoadingVision = true;
       _visionError = null;
+      _visionApiException = null;
     });
 
     try {
@@ -60,6 +65,15 @@ class _AlertsScreenState extends State<AlertsScreen> with SingleTickerProviderSt
       if (mounted) {
         setState(() {
           _visionAlerts = alerts;
+          _isLoadingVision = false;
+          _hasSuccessfulLoad = true;
+        });
+      }
+    } on RailGuardApiException catch (e) {
+      if (mounted) {
+        setState(() {
+          _visionApiException = e;
+          _visionError = e.message;
           _isLoadingVision = false;
         });
       }
@@ -95,7 +109,9 @@ class _AlertsScreenState extends State<AlertsScreen> with SingleTickerProviderSt
           tabs: [
             Tab(
               icon: const Icon(Icons.luggage_outlined, size: 20),
-              text: "Luggage Vision (${_visionAlerts.length})",
+              text: _hasSuccessfulLoad
+                  ? "Luggage Vision (${_visionAlerts.length})"
+                  : "Luggage Vision",
             ),
             Tab(
               icon: const Icon(Icons.sensors_rounded, size: 20),
@@ -175,8 +191,16 @@ class _AlertsScreenState extends State<AlertsScreen> with SingleTickerProviderSt
             ),
           ),
 
-          // Error Banner if present
-          if (_visionError != null)
+          // Loading bar if refreshing with existing alerts
+          if (_isLoadingVision && _visionAlerts.isNotEmpty)
+            const LinearProgressIndicator(
+              color: AppColors.primaryCyan,
+              backgroundColor: Colors.transparent,
+              minHeight: 2,
+            ),
+
+          // Error Banner if present when alerts are already populated
+          if (_visionError != null && _visionAlerts.isNotEmpty)
             Container(
               margin: const EdgeInsets.all(14),
               padding: const EdgeInsets.all(12),
@@ -199,37 +223,172 @@ class _AlertsScreenState extends State<AlertsScreen> with SingleTickerProviderSt
                     ),
                   ),
                   TextButton(
-                    onPressed: _loadVisionAlerts,
+                    onPressed: _isLoadingVision ? null : _loadVisionAlerts,
                     child: const Text("Retry", style: TextStyle(color: AppColors.primaryCyan)),
                   ),
                 ],
               ),
             ),
 
-          // Alerts List or Empty
+          // Alerts List, Loading State, Error State, or True Empty State
           Expanded(
-            child: _isLoadingVision && _visionAlerts.isEmpty
-                ? const Center(
-                    child: CircularProgressIndicator(color: AppColors.primaryCyan),
-                  )
-                : _visionAlerts.isEmpty
-                    ? const EmptyStateView(
-                        icon: Icons.luggage_outlined,
-                        title: "No Luggage Alerts",
-                        description:
-                            "No unattended luggage alerts recorded. Real-time detections from station cameras will appear here.",
-                      )
-                    : ListView.separated(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _visionAlerts.length,
-                        separatorBuilder: (_, _) => const SizedBox(height: 10),
-                        itemBuilder: (context, index) {
-                          final alert = _visionAlerts[index];
-                          return _buildVisionAlertCard(alert);
-                        },
-                      ),
+            child: _buildVisionBodyContent(),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildVisionBodyContent() {
+    // 1. Initial loading state (no alerts yet)
+    if (_isLoadingVision && _visionAlerts.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(color: AppColors.primaryCyan),
+              const SizedBox(height: 20),
+              Text(
+                "Connecting to RailGuard Vision...",
+                style: GoogleFonts.inter(
+                  color: AppColors.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                "Initial connection may take ~30s if Render backend is spinning up from idle.",
+                style: GoogleFonts.inter(
+                  color: AppColors.textMuted,
+                  fontSize: 12.5,
+                  height: 1.4,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // 2. Error state (no alerts loaded and request failed)
+    if (_visionError != null && _visionAlerts.isEmpty) {
+      return _buildVisionErrorView(_visionApiException, _visionError!);
+    }
+
+    // 3. True empty state (successful request, but zero alerts)
+    if (_visionAlerts.isEmpty) {
+      return const EmptyStateView(
+        icon: Icons.luggage_outlined,
+        title: "No Luggage Alerts",
+        description:
+            "No unattended luggage alerts recorded. Real-time detections from station cameras will appear here.",
+      );
+    }
+
+    // 4. Populated alerts list
+    return ListView.separated(
+      padding: const EdgeInsets.all(16),
+      itemCount: _visionAlerts.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 10),
+      itemBuilder: (context, index) {
+        final alert = _visionAlerts[index];
+        return _buildVisionAlertCard(alert);
+      },
+    );
+  }
+
+  Widget _buildVisionErrorView(RailGuardApiException? apiException, String errorMsg) {
+    IconData icon;
+    String title;
+    String description;
+
+    if (apiException is RailGuardTimeoutException) {
+      icon = Icons.timer_off_outlined;
+      title = "Request Timed Out";
+      description =
+          "The backend service took longer than expected to respond. If the Render Free tier service is waking up, please retry in a moment.";
+    } else if (apiException is RailGuardAuthException) {
+      icon = Icons.lock_outline_rounded;
+      title = "Authentication Required";
+      description =
+          "Operator alert listing requires a valid Firebase ID token. Please log in or refresh your session.";
+    } else if (apiException is RailGuardForbiddenException) {
+      icon = Icons.block_flipped;
+      title = "Access Forbidden";
+      description =
+          "Your current user does not have permission to view operator vision alerts.";
+    } else if (apiException is RailGuardServerException) {
+      icon = Icons.cloud_off_rounded;
+      title = "Server Error (HTTP 500)";
+      description =
+          "The RailGuard Vision server reported an internal error ($errorMsg). Please retry or inspect server logs.";
+    } else if (apiException is RailGuardNetworkException) {
+      icon = Icons.wifi_off_rounded;
+      title = "Connection Failed";
+      description =
+          "Unable to reach the RailGuard Vision backend. Verify network connection and CORS configuration.";
+    } else {
+      icon = Icons.error_outline_rounded;
+      title = "Failed to Load Alerts";
+      description = errorMsg;
+    }
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: AppColors.statusDanger.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+                border: Border.all(color: AppColors.statusDanger.withValues(alpha: 0.3)),
+              ),
+              child: Icon(icon, size: 44, color: AppColors.statusDanger),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              title,
+              style: GoogleFonts.inter(
+                color: AppColors.textPrimary,
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              description,
+              style: GoogleFonts.inter(
+                color: AppColors.textSecondary,
+                fontSize: 13,
+                height: 1.4,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: _isLoadingVision ? null : _loadVisionAlerts,
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              label: Text(
+                _isLoadingVision ? "Retrying..." : "Retry",
+                style: GoogleFonts.inter(fontWeight: FontWeight.w600),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primaryCyan,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

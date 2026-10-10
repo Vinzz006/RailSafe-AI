@@ -457,3 +457,145 @@ def test_evidence_delivery_and_path_traversal_protection(test_env: dict) -> None
 
     res_evil = client.get("/api/alerts/EVT-EVIL-01/snapshot", headers=headers)
     assert res_evil.status_code in (403, 404)
+
+
+def test_cors_preflight_options(test_env: dict) -> None:
+    """Verify OPTIONS preflight from http://localhost:54313 succeeds with CORS headers."""
+    client: TestClient = test_env["client"]
+    res = client.options(
+        "/api/alerts",
+        headers={
+            "Origin": "http://localhost:54313",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert res.status_code == 200
+    assert res.headers.get("access-control-allow-origin") == "http://localhost:54313"
+    assert "GET" in res.headers.get("access-control-allow-methods", "")
+
+
+def test_cors_authorized_get_request(test_env: dict) -> None:
+    """Verify authorized GET request from permitted origin includes CORS headers."""
+    client: TestClient = test_env["client"]
+    operator_token = test_env["operator_token"]
+    res = client.get(
+        "/api/alerts?limit=50&unreviewed_only=true",
+        headers={
+            "Origin": "http://localhost:54313",
+            "Authorization": f"Bearer {operator_token}",
+        },
+    )
+    assert res.status_code == 200
+    assert res.headers.get("access-control-allow-origin") == "http://localhost:54313"
+
+
+def test_cors_headers_on_401_and_403_responses(test_env: dict) -> None:
+    """Verify 401 and 403 responses include CORS headers for permitted origin."""
+    client: TestClient = test_env["client"]
+
+    # Missing token -> 401
+    res_401 = client.get(
+        "/api/alerts",
+        headers={"Origin": "http://localhost:54313"},
+    )
+    assert res_401.status_code == 401
+    assert res_401.headers.get("access-control-allow-origin") == "http://localhost:54313"
+
+    # Ingestion endpoint with invalid agent token -> 401
+    res_ingest_401 = client.post(
+        "/api/ingest/alerts",
+        json={"event_uid": "EVT-TEST", "camera_id": "CAM-1", "track_id": 1, "object_class": "bag", "event_duration": 15.0, "reason": "test"},
+        headers={"Origin": "http://localhost:54313", "X-Agent-Token": "wrong-agent-token"},
+    )
+    assert res_ingest_401.status_code == 401
+    assert res_ingest_401.headers.get("access-control-allow-origin") == "http://localhost:54313"
+
+
+def test_cors_headers_on_500_response(test_env: dict) -> None:
+    """Verify controlled HTTP 500 includes CORS headers and does not mask errors as empty lists."""
+    client: TestClient = test_env["client"]
+    operator_token = test_env["operator_token"]
+    repo: MockFirestoreRepository = test_env["repo"]
+
+    # Force repository to raise unexpected database error
+    def failing_list_alerts(**kwargs):
+        raise RuntimeError("Unexpected Firestore connection failure")
+
+    repo.list_alerts = failing_list_alerts
+
+    res = client.get(
+        "/api/alerts?limit=50",
+        headers={
+            "Origin": "http://localhost:54313",
+            "Authorization": f"Bearer {operator_token}",
+        },
+    )
+    # Must NOT mask exception as an empty alert list
+    assert res.status_code == 500
+    assert res.headers.get("access-control-allow-origin") == "http://localhost:54313"
+    assert "Failed to retrieve alerts" in res.json()["detail"]
+
+
+def test_cors_unapproved_origin_rejected(test_env: dict) -> None:
+    """Verify unapproved origin does NOT receive CORS access headers."""
+    client: TestClient = test_env["client"]
+    operator_token = test_env["operator_token"]
+    unapproved_origin = "http://unapproved-hacker-site.com"
+
+    res = client.get(
+        "/api/alerts",
+        headers={
+            "Origin": unapproved_origin,
+            "Authorization": f"Bearer {operator_token}",
+        },
+    )
+    assert res.headers.get("access-control-allow-origin") != unapproved_origin
+
+
+def test_alerts_listing_query_parameters(test_env: dict) -> None:
+    """Verify alert listing handles limit=50, unreviewed_only, and status filters correctly."""
+    client: TestClient = test_env["client"]
+    operator_token = test_env["operator_token"]
+    repo: MockFirestoreRepository = test_env["repo"]
+    headers = {"Authorization": f"Bearer {operator_token}"}
+
+    # Populate 3 alerts with different review statuses
+    for i, st in enumerate(["unreviewed", "verified", "false_alarm"]):
+        repo.create_or_update_alert({
+            "event_uid": f"EVT-PARAM-{i}",
+            "timestamp": "2026-10-11T01:00:00Z",
+            "camera_id": "CAM-PARAM",
+            "track_id": i,
+            "object_class": "luggage",
+            "event_duration": 15.0 + i,
+            "reason": f"Param test {i}",
+            "review_status": st,
+        })
+
+    # Test limit=50
+    res_limit = client.get("/api/alerts?limit=50", headers=headers)
+    assert res_limit.status_code == 200
+    assert len(res_limit.json()) == 3
+
+    # Test unreviewed_only=true
+    res_unreviewed = client.get("/api/alerts?limit=50&unreviewed_only=true", headers=headers)
+    assert res_unreviewed.status_code == 200
+    assert len(res_unreviewed.json()) == 1
+    assert res_unreviewed.json()[0]["review_status"] == "unreviewed"
+
+    # Test status=verified
+    res_verified = client.get("/api/alerts?limit=50&status=verified", headers=headers)
+    assert res_verified.status_code == 200
+    assert len(res_verified.json()) == 1
+    assert res_verified.json()[0]["review_status"] == "verified"
+
+    # Test status=all
+    res_all = client.get("/api/alerts?limit=50&status=all", headers=headers)
+    assert res_all.status_code == 200
+    assert len(res_all.json()) == 3
+
+    # Test invalid status returns 400 Bad Request
+    res_invalid = client.get("/api/alerts?limit=50&status=bad_status", headers=headers)
+    assert res_invalid.status_code == 400
+

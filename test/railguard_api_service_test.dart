@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
@@ -184,11 +185,79 @@ void main() {
         throwsA(
           predicate(
             (e) =>
-                e is Exception &&
-                e.toString().contains("Forbidden (HTTP 403)"),
+                e is RailGuardForbiddenException &&
+                e.message.contains("Forbidden (HTTP 403)"),
           ),
         ),
       );
+    });
+
+    test('Handles HTTP 500 Server Error throwing RailGuardServerException without masking as empty', () async {
+      final mockClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({"detail": "Failed to retrieve alerts from persistence layer."}),
+          500,
+        );
+      });
+
+      final authService = TestMockAuthService(storage, mockToken: "valid-token");
+      final service = RailGuardApiService(
+        storage,
+        authService: authService,
+        client: mockClient,
+      );
+
+      expect(
+        () async => await service.getAlerts(),
+        throwsA(
+          predicate(
+            (e) =>
+                e is RailGuardServerException &&
+                e.statusCode == 500 &&
+                e.message.contains("Backend server error (HTTP 500)"),
+          ),
+        ),
+      );
+    });
+
+    test('Handles TimeoutException throwing RailGuardTimeoutException with retry guidance', () async {
+      final mockClient = MockClient((request) async {
+        throw TimeoutException("Future not completed within timeout");
+      });
+
+      final authService = TestMockAuthService(storage, mockToken: "valid-token");
+      final service = RailGuardApiService(
+        storage,
+        authService: authService,
+        client: mockClient,
+      );
+
+      expect(
+        () async => await service.getAlerts(),
+        throwsA(
+          predicate(
+            (e) =>
+                e is RailGuardTimeoutException &&
+                e.message.contains("Connection timed out"),
+          ),
+        ),
+      );
+    });
+
+    test('Successful empty response returns empty list without error', () async {
+      final mockClient = MockClient((request) async {
+        return http.Response(jsonEncode([]), 200);
+      });
+
+      final authService = TestMockAuthService(storage, mockToken: "valid-token");
+      final service = RailGuardApiService(
+        storage,
+        authService: authService,
+        client: mockClient,
+      );
+
+      final alerts = await service.getAlerts();
+      expect(alerts, isEmpty);
     });
   });
 

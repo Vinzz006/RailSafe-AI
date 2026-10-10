@@ -8,6 +8,39 @@ import '../models/app_alert.dart';
 import 'auth_service.dart';
 import 'local_storage_service.dart';
 
+/// Specific exception types for RailGuard Vision API interactions
+class RailGuardApiException implements Exception {
+  final String message;
+  final int? statusCode;
+  RailGuardApiException(this.message, [this.statusCode]);
+  @override
+  String toString() => message;
+}
+
+class RailGuardTimeoutException extends RailGuardApiException {
+  RailGuardTimeoutException(super.message);
+}
+
+class RailGuardAuthException extends RailGuardApiException {
+  RailGuardAuthException(super.message, [super.statusCode = 401]);
+}
+
+class RailGuardForbiddenException extends RailGuardApiException {
+  RailGuardForbiddenException(super.message, [super.statusCode = 403]);
+}
+
+class RailGuardServerException extends RailGuardApiException {
+  RailGuardServerException(super.message, [super.statusCode = 500]);
+}
+
+class RailGuardNetworkException extends RailGuardApiException {
+  RailGuardNetworkException(super.message);
+}
+
+class RailGuardFormatException extends RailGuardApiException {
+  RailGuardFormatException(super.message);
+}
+
 /// Represents an unattended luggage alert returned by the RailGuard Vision API.
 class RailGuardAlertModel {
   final dynamic id;
@@ -201,10 +234,14 @@ class RailGuardApiService {
   final AuthService? _authService;
   final http.Client _client;
 
+  /// Configurable request timeout accommodating Render Free tier wake-up latency (~30-40s)
+  final Duration requestTimeout;
+
   RailGuardApiService(
     this._storage, {
     this._authService,
     http.Client? client,
+    this.requestTimeout = const Duration(seconds: 35),
   })  : _client = client ?? http.Client();
 
   /// Default production Render URL as single source of truth
@@ -227,8 +264,9 @@ class RailGuardApiService {
     }
 
     if (effectiveToken == null || effectiveToken.trim().isEmpty) {
-      throw Exception(
+      throw RailGuardAuthException(
         "User is not signed in. Please sign in with Firebase to access operator endpoints.",
+        401,
       );
     }
 
@@ -245,7 +283,7 @@ class RailGuardApiService {
     final uri = Uri.parse("$target/health");
 
     try {
-      final res = await _client.get(uri).timeout(const Duration(seconds: 4));
+      final res = await _client.get(uri).timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
         final decoded = jsonDecode(res.body) as Map<String, dynamic>;
         return {
@@ -261,7 +299,7 @@ class RailGuardApiService {
         "message": "HTTP ${res.statusCode}: ${res.body}",
       };
     } on TimeoutException {
-      return {"success": false, "message": "Connection timed out to $target"};
+      return {"success": false, "message": "Connection timed out to $target (server waking up?)"};
     } on SocketException catch (e) {
       return {"success": false, "message": "Socket error: ${e.message}"};
     } catch (e) {
@@ -275,7 +313,7 @@ class RailGuardApiService {
     final uri = Uri.parse("$target/ready");
 
     try {
-      final res = await _client.get(uri).timeout(const Duration(seconds: 5));
+      final res = await _client.get(uri).timeout(const Duration(seconds: 12));
       if (res.statusCode == 200) {
         final decoded = jsonDecode(res.body) as Map<String, dynamic>;
         return {
@@ -301,38 +339,59 @@ class RailGuardApiService {
     bool unreviewedOnly = false,
     String? status,
     String? overrideUrl,
+    Duration? customTimeout,
   }) async {
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
     final queryParams = <String, String>{
       "limit": limit.toString(),
       if (unreviewedOnly) "unreviewed_only": "true",
     };
-    if (status != null && status.isNotEmpty) {
+    if (status != null && status.isNotEmpty && status.toLowerCase() != 'all') {
       queryParams["status"] = status;
     }
 
     final uri = Uri.parse("$target/api/alerts").replace(queryParameters: queryParams);
     final headers = await _buildHeaders();
+    final effectiveTimeout = customTimeout ?? requestTimeout;
 
-    final res = await _client
-        .get(uri, headers: headers)
-        .timeout(const Duration(seconds: 6));
+    try {
+      final res = await _client.get(uri, headers: headers).timeout(effectiveTimeout);
 
-    if (res.statusCode == 200) {
-      try {
-        final list = jsonDecode(res.body) as List<dynamic>;
-        return list
-            .map((item) => RailGuardAlertModel.fromJson(item as Map<String, dynamic>))
-            .toList();
-      } catch (e) {
-        throw Exception("Malformed response parsing alerts: $e");
+      if (res.statusCode == 200) {
+        try {
+          final list = jsonDecode(res.body) as List<dynamic>;
+          return list
+              .map((item) => RailGuardAlertModel.fromJson(item as Map<String, dynamic>))
+              .toList();
+        } catch (e) {
+          throw RailGuardFormatException("Malformed response parsing alerts: $e");
+        }
+      } else if (res.statusCode == 401) {
+        throw RailGuardAuthException(
+          "Session expired or unauthorized (HTTP 401). Please sign in again.",
+          401,
+        );
+      } else if (res.statusCode == 403) {
+        throw RailGuardForbiddenException(
+          "Forbidden (HTTP 403). You do not have permission to view alerts.",
+          403,
+        );
+      } else if (res.statusCode >= 500) {
+        throw RailGuardServerException(
+          "Backend server error (HTTP ${res.statusCode}). Service may be waking up or experiencing issues.",
+          res.statusCode,
+        );
+      } else {
+        throw RailGuardApiException("Failed to load alerts: HTTP ${res.statusCode}", res.statusCode);
       }
-    } else if (res.statusCode == 401) {
-      throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
-    } else if (res.statusCode == 403) {
-      throw Exception("Forbidden (HTTP 403). You do not have permission to view alerts.");
-    } else {
-      throw Exception("Failed to load alerts: HTTP ${res.statusCode}");
+    } on TimeoutException {
+      throw RailGuardTimeoutException(
+        "Connection timed out (${effectiveTimeout.inSeconds}s). Render server may be waking up from idle. Please tap Retry.",
+      );
+    } on SocketException catch (e) {
+      throw RailGuardNetworkException("Network error connecting to backend: ${e.message}");
+    } on http.ClientException catch (e) {
+      throw RailGuardNetworkException("Connection failed: ${e.message}");
     }
   }
 
@@ -345,21 +404,27 @@ class RailGuardApiService {
     final uri = Uri.parse("$target/api/alerts/$alertId");
     final headers = await _buildHeaders();
 
-    final res = await _client
-        .get(uri, headers: headers)
-        .timeout(const Duration(seconds: 5));
+    try {
+      final res = await _client.get(uri, headers: headers).timeout(requestTimeout);
 
-    if (res.statusCode == 200) {
-      final decoded = jsonDecode(res.body) as Map<String, dynamic>;
-      return RailGuardAlertModel.fromJson(decoded);
-    } else if (res.statusCode == 401) {
-      throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
-    } else if (res.statusCode == 403) {
-      throw Exception("Forbidden (HTTP 403). You do not have permission to view this alert.");
-    } else if (res.statusCode == 404) {
-      throw Exception("Alert not found (HTTP 404).");
-    } else {
-      throw Exception("Failed to load alert details: HTTP ${res.statusCode}");
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(res.body) as Map<String, dynamic>;
+        return RailGuardAlertModel.fromJson(decoded);
+      } else if (res.statusCode == 401) {
+        throw RailGuardAuthException("Session expired or unauthorized (HTTP 401). Please sign in again.");
+      } else if (res.statusCode == 403) {
+        throw RailGuardForbiddenException("Forbidden (HTTP 403). You do not have permission to view this alert.");
+      } else if (res.statusCode == 404) {
+        throw RailGuardApiException("Alert not found (HTTP 404).", 404);
+      } else if (res.statusCode >= 500) {
+        throw RailGuardServerException("Backend server error (HTTP ${res.statusCode}).");
+      } else {
+        throw RailGuardApiException("Failed to load alert details: HTTP ${res.statusCode}", res.statusCode);
+      }
+    } on TimeoutException {
+      throw RailGuardTimeoutException("Connection timed out loading alert details.");
+    } on SocketException catch (e) {
+      throw RailGuardNetworkException("Network error: ${e.message}");
     }
   }
 
@@ -380,21 +445,28 @@ class RailGuardApiService {
 
     final payload = jsonEncode({"review_status": reviewStatus});
     final headers = await _buildHeaders();
-    final res = await _client
-        .patch(uri, headers: headers, body: payload)
-        .timeout(const Duration(seconds: 6));
 
-    if (res.statusCode == 200) {
-      final decoded = jsonDecode(res.body) as Map<String, dynamic>;
-      return RailGuardAlertModel.fromJson(decoded);
-    } else if (res.statusCode == 401) {
-      throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
-    } else if (res.statusCode == 403) {
-      throw Exception("Forbidden (HTTP 403). You do not have permission to submit reviews.");
-    } else if (res.statusCode == 404) {
-      throw Exception("Alert not found (HTTP 404).");
-    } else {
-      throw Exception("Failed to update review status: HTTP ${res.statusCode}");
+    try {
+      final res = await _client.patch(uri, headers: headers, body: payload).timeout(requestTimeout);
+
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(res.body) as Map<String, dynamic>;
+        return RailGuardAlertModel.fromJson(decoded);
+      } else if (res.statusCode == 401) {
+        throw RailGuardAuthException("Session expired or unauthorized (HTTP 401). Please sign in again.");
+      } else if (res.statusCode == 403) {
+        throw RailGuardForbiddenException("Forbidden (HTTP 403). You do not have permission to submit reviews.");
+      } else if (res.statusCode == 404) {
+        throw RailGuardApiException("Alert not found (HTTP 404).", 404);
+      } else if (res.statusCode >= 500) {
+        throw RailGuardServerException("Backend server error (HTTP ${res.statusCode}).");
+      } else {
+        throw RailGuardApiException("Failed to update review status: HTTP ${res.statusCode}", res.statusCode);
+      }
+    } on TimeoutException {
+      throw RailGuardTimeoutException("Connection timed out submitting review. Please retry.");
+    } on SocketException catch (e) {
+      throw RailGuardNetworkException("Network error submitting review: ${e.message}");
     }
   }
 
@@ -403,7 +475,7 @@ class RailGuardApiService {
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
     final token = await _authService?.getIdToken();
     if (token == null || token.trim().isEmpty) {
-      throw Exception("User is not signed in. Cannot generate evidence URL.");
+      throw RailGuardAuthException("User is not signed in. Cannot generate evidence URL.");
     }
     return "$target/api/alerts/$alertId/snapshot?token=${Uri.encodeComponent(token.trim())}";
   }
@@ -413,7 +485,7 @@ class RailGuardApiService {
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
     final token = await _authService?.getIdToken();
     if (token == null || token.trim().isEmpty) {
-      throw Exception("User is not signed in. Cannot generate video clip URL.");
+      throw RailGuardAuthException("User is not signed in. Cannot generate video clip URL.");
     }
     return "$target/api/alerts/$alertId/clip?token=${Uri.encodeComponent(token.trim())}";
   }
@@ -424,17 +496,25 @@ class RailGuardApiService {
     final uri = Uri.parse("$target/api/alerts/$alertId/snapshot");
     final headers = await _buildHeaders();
 
-    final res = await _client.get(uri, headers: headers).timeout(const Duration(seconds: 8));
-    if (res.statusCode == 200) {
-      return res.bodyBytes;
-    } else if (res.statusCode == 401) {
-      throw Exception("Unauthorized (HTTP 401): Session expired.");
-    } else if (res.statusCode == 403) {
-      throw Exception("Forbidden (HTTP 403): Insufficient permissions.");
-    } else if (res.statusCode == 404) {
-      throw Exception("Snapshot not found (HTTP 404).");
-    } else {
-      throw Exception("Failed to load snapshot: HTTP ${res.statusCode}");
+    try {
+      final res = await _client.get(uri, headers: headers).timeout(requestTimeout);
+      if (res.statusCode == 200) {
+        return res.bodyBytes;
+      } else if (res.statusCode == 401) {
+        throw RailGuardAuthException("Unauthorized (HTTP 401): Session expired.");
+      } else if (res.statusCode == 403) {
+        throw RailGuardForbiddenException("Forbidden (HTTP 403): Insufficient permissions.");
+      } else if (res.statusCode == 404) {
+        throw RailGuardApiException("Snapshot not found (HTTP 404).", 404);
+      } else if (res.statusCode >= 500) {
+        throw RailGuardServerException("Backend server error loading snapshot: HTTP ${res.statusCode}");
+      } else {
+        throw RailGuardApiException("Failed to load snapshot: HTTP ${res.statusCode}", res.statusCode);
+      }
+    } on TimeoutException {
+      throw RailGuardTimeoutException("Connection timed out loading snapshot image.");
+    } on SocketException catch (e) {
+      throw RailGuardNetworkException("Network error loading snapshot: ${e.message}");
     }
   }
 
@@ -444,15 +524,21 @@ class RailGuardApiService {
     final uri = Uri.parse("$target/api/alerts/$alertId/clip");
     final headers = await _buildHeaders();
 
-    final res = await _client.get(uri, headers: headers).timeout(const Duration(seconds: 15));
-    if (res.statusCode == 200) {
-      return res.bodyBytes;
-    } else if (res.statusCode == 404) {
-      return null;
-    } else if (res.statusCode == 401) {
-      throw Exception("Unauthorized (HTTP 401): Session expired.");
-    } else {
-      throw Exception("Failed to stream video clip: HTTP ${res.statusCode}");
+    try {
+      final res = await _client.get(uri, headers: headers).timeout(requestTimeout);
+      if (res.statusCode == 200) {
+        return res.bodyBytes;
+      } else if (res.statusCode == 404) {
+        return null;
+      } else if (res.statusCode == 401) {
+        throw RailGuardAuthException("Unauthorized (HTTP 401): Session expired.");
+      } else {
+        throw RailGuardApiException("Failed to stream video clip: HTTP ${res.statusCode}", res.statusCode);
+      }
+    } on TimeoutException {
+      throw RailGuardTimeoutException("Connection timed out loading video clip.");
+    } on SocketException catch (e) {
+      throw RailGuardNetworkException("Network error loading clip: ${e.message}");
     }
   }
 
@@ -462,13 +548,17 @@ class RailGuardApiService {
     final uri = Uri.parse("$target/api/alerts/stats/false-alarm-rate");
     final headers = await _buildHeaders();
 
-    final res = await _client.get(uri, headers: headers).timeout(const Duration(seconds: 5));
-    if (res.statusCode == 200) {
-      return jsonDecode(res.body) as Map<String, dynamic>;
-    } else if (res.statusCode == 401) {
-      throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
+    try {
+      final res = await _client.get(uri, headers: headers).timeout(requestTimeout);
+      if (res.statusCode == 200) {
+        return jsonDecode(res.body) as Map<String, dynamic>;
+      } else if (res.statusCode == 401) {
+        throw RailGuardAuthException("Session expired or unauthorized (HTTP 401). Please sign in again.");
+      }
+      return {"false_alarm_rate": null, "total_reviewed": 0, "false_alarms": 0};
+    } catch (_) {
+      return {"false_alarm_rate": null, "total_reviewed": 0, "false_alarms": 0};
     }
-    return {"false_alarm_rate": null, "total_reviewed": 0, "false_alarms": 0};
   }
 
   void dispose() {
