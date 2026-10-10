@@ -63,6 +63,13 @@ class LocalStorageService {
     await _prefs.setString(AppConstants.keyBackendUrl, url.trim());
   }
 
+  // --- RailGuard Vision Production Server URL ---
+  String getRailGuardBackendUrl() =>
+      _prefs.getString(AppConstants.keyRailGuardBackendUrl) ?? AppConstants.defaultRailGuardBackendUrl;
+  Future<void> setRailGuardBackendUrl(String url) async {
+    await _prefs.setString(AppConstants.keyRailGuardBackendUrl, url.trim());
+  }
+
   // --- Offline Tests Persistence ---
   List<TestRecord> getSavedTests() {
     final raw = _prefs.getString(AppConstants.keySavedTests);

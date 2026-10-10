@@ -17,6 +17,10 @@ class AppConstants {
   static const String keyBackendUrl = "backend_api_url";
   static const String defaultBackendUrl = "http://10.0.2.2:8000";
 
+  // RailGuard Vision Production Cloud Backend (Single Source of Truth)
+  static const String keyRailGuardBackendUrl = "railguard_backend_api_url";
+  static const String defaultRailGuardBackendUrl = "https://railsafe-ai-backend.onrender.com";
+
   // Screening Assistance Disclaimer
   static const String prototypeDisclaimer =
       "PROTOTYPE NOTICE: RailSafe AI provides assistive screening indications for research and hardware evaluation. "

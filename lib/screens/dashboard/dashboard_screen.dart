@@ -418,6 +418,87 @@ class DashboardScreen extends StatelessWidget {
                   ],
                 ),
 
+                const SizedBox(height: 14),
+
+                // RailGuard Vision Surveillance Card
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceCard,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: AppColors.primaryCyan.withValues(alpha: 0.35),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.videocam_outlined,
+                                color: AppColors.primaryCyan,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                "RAILGUARD VISION SURVEILLANCE",
+                                style: GoogleFonts.orbitron(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.textSecondary,
+                                  letterSpacing: 1.0,
+                                ),
+                              ),
+                            ],
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: AppColors.primaryCyan.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              "RENDER CLOUD",
+                              style: GoogleFonts.orbitron(
+                                color: AppColors.primaryCyan,
+                                fontSize: 9,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        "Station unattended luggage early-warning prototype. Review camera snapshots, verify platform alerts, or flag false alarms.",
+                        style: GoogleFonts.inter(
+                          color: AppColors.textSecondary,
+                          fontSize: 12,
+                          height: 1.35,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      CustomButton(
+                        text: "Review Luggage Vision Alerts",
+                        icon: Icons.luggage_outlined,
+                        isSecondary: true,
+                        height: 40,
+                        onPressed: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const AlertsScreen(initialTabIndex: 0),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+
                 const SizedBox(height: 20),
 
                 // Latest Test Result Card

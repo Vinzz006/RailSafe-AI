@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
+import '../core/constants/app_constants.dart';
 import '../models/app_alert.dart';
 import 'auth_service.dart';
 import 'local_storage_service.dart';
@@ -10,7 +11,7 @@ import 'local_storage_service.dart';
 /// Represents an unattended luggage alert returned by the RailGuard Vision API.
 class RailGuardAlertModel {
   final dynamic id;
-  final String? eventUid;
+  final String eventUid;
   final DateTime timestamp;
   final String cameraId;
   final int trackId;
@@ -21,12 +22,14 @@ class RailGuardAlertModel {
   final String? clipUrl;
   final String reviewStatus; // 'unreviewed', 'verified', 'false_alarm'
   final String? reviewedBy;
+  final DateTime? reviewedAt;
   final DateTime? clearedTimestamp;
+  final DateTime? createdAt;
   final String disclaimer;
 
   RailGuardAlertModel({
     required this.id,
-    this.eventUid,
+    required this.eventUid,
     required this.timestamp,
     required this.cameraId,
     required this.trackId,
@@ -37,28 +40,136 @@ class RailGuardAlertModel {
     this.clipUrl,
     required this.reviewStatus,
     this.reviewedBy,
+    this.reviewedAt,
     this.clearedTimestamp,
-    this.disclaimer = "FOR HUMAN REVIEW ONLY — Does not detect explosives or narcotics.",
+    this.createdAt,
+    this.disclaimer =
+        "FOR HUMAN REVIEW ONLY — Does not detect explosives or narcotics. Verify physical context.",
   });
 
+  bool get isReviewed => reviewStatus == 'verified' || reviewStatus == 'false_alarm';
+  bool get isVerified => reviewStatus == 'verified';
+  bool get isFalseAlarm => reviewStatus == 'false_alarm';
+  bool get isUnreviewed => reviewStatus == 'unreviewed';
+  bool get isCleared => clearedTimestamp != null;
+
   factory RailGuardAlertModel.fromJson(Map<String, dynamic> json) {
+    final rawId = json['id'] ?? json['event_uid'] ?? 0;
+    final uid = json['event_uid']?.toString() ?? rawId.toString();
+
+    DateTime parsedTimestamp;
+    if (json['timestamp'] != null) {
+      parsedTimestamp = DateTime.tryParse(json['timestamp'].toString()) ?? DateTime.now();
+    } else {
+      parsedTimestamp = DateTime.now();
+    }
+
+    int parsedTrackId = 0;
+    if (json['track_id'] is int) {
+      parsedTrackId = json['track_id'] as int;
+    } else if (json['track_id'] != null) {
+      parsedTrackId = int.tryParse(json['track_id'].toString()) ?? 0;
+    }
+
+    double parsedDuration = 0.0;
+    if (json['event_duration'] is num) {
+      parsedDuration = (json['event_duration'] as num).toDouble();
+    } else if (json['event_duration'] != null) {
+      parsedDuration = double.tryParse(json['event_duration'].toString()) ?? 0.0;
+    }
+
+    DateTime? parsedReviewedAt;
+    if (json['reviewed_at'] != null) {
+      parsedReviewedAt = DateTime.tryParse(json['reviewed_at'].toString());
+    }
+
+    DateTime? parsedCleared;
+    if (json['cleared_timestamp'] != null) {
+      parsedCleared = DateTime.tryParse(json['cleared_timestamp'].toString());
+    }
+
+    DateTime? parsedCreated;
+    if (json['created_at'] != null) {
+      parsedCreated = DateTime.tryParse(json['created_at'].toString());
+    }
+
     return RailGuardAlertModel(
-      id: json['id'] ?? json['event_uid'] ?? 0,
-      eventUid: json['event_uid']?.toString(),
-      timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ?? DateTime.now(),
+      id: rawId,
+      eventUid: uid,
+      timestamp: parsedTimestamp,
       cameraId: json['camera_id']?.toString() ?? 'CAM-01',
-      trackId: json['track_id'] is int ? json['track_id'] : int.tryParse(json['track_id'].toString()) ?? 0,
+      trackId: parsedTrackId,
       objectClass: json['object_class']?.toString() ?? 'luggage',
-      eventDuration: (json['event_duration'] is num) ? (json['event_duration'] as num).toDouble() : 0.0,
+      eventDuration: parsedDuration,
       reason: json['reason']?.toString() ?? 'Unattended object condition',
-      snapshotUrl: json['snapshot_url']?.toString() ?? '',
+      snapshotUrl: json['snapshot_url']?.toString() ?? '/api/alerts/$uid/snapshot',
       clipUrl: json['clip_url']?.toString(),
       reviewStatus: json['review_status']?.toString() ?? 'unreviewed',
       reviewedBy: json['reviewed_by']?.toString(),
-      clearedTimestamp: json['cleared_timestamp'] != null
-          ? DateTime.tryParse(json['cleared_timestamp'].toString())
-          : null,
-      disclaimer: json['disclaimer']?.toString() ?? "FOR HUMAN REVIEW ONLY",
+      reviewedAt: parsedReviewedAt,
+      clearedTimestamp: parsedCleared,
+      createdAt: parsedCreated,
+      disclaimer: json['disclaimer']?.toString() ??
+          "FOR HUMAN REVIEW ONLY — Does not detect explosives or narcotics. Verify physical context.",
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'event_uid': eventUid,
+      'timestamp': timestamp.toIso8601String(),
+      'camera_id': cameraId,
+      'track_id': trackId,
+      'object_class': objectClass,
+      'event_duration': eventDuration,
+      'reason': reason,
+      'snapshot_url': snapshotUrl,
+      'clip_url': clipUrl,
+      'review_status': reviewStatus,
+      'reviewed_by': reviewedBy,
+      'reviewed_at': reviewedAt?.toIso8601String(),
+      'cleared_timestamp': clearedTimestamp?.toIso8601String(),
+      'created_at': createdAt?.toIso8601String(),
+      'disclaimer': disclaimer,
+    };
+  }
+
+  RailGuardAlertModel copyWith({
+    dynamic id,
+    String? eventUid,
+    DateTime? timestamp,
+    String? cameraId,
+    int? trackId,
+    String? objectClass,
+    double? eventDuration,
+    String? reason,
+    String? snapshotUrl,
+    String? clipUrl,
+    String? reviewStatus,
+    String? reviewedBy,
+    DateTime? reviewedAt,
+    DateTime? clearedTimestamp,
+    DateTime? createdAt,
+    String? disclaimer,
+  }) {
+    return RailGuardAlertModel(
+      id: id ?? this.id,
+      eventUid: eventUid ?? this.eventUid,
+      timestamp: timestamp ?? this.timestamp,
+      cameraId: cameraId ?? this.cameraId,
+      trackId: trackId ?? this.trackId,
+      objectClass: objectClass ?? this.objectClass,
+      eventDuration: eventDuration ?? this.eventDuration,
+      reason: reason ?? this.reason,
+      snapshotUrl: snapshotUrl ?? this.snapshotUrl,
+      clipUrl: clipUrl ?? this.clipUrl,
+      reviewStatus: reviewStatus ?? this.reviewStatus,
+      reviewedBy: reviewedBy ?? this.reviewedBy,
+      reviewedAt: reviewedAt ?? this.reviewedAt,
+      clearedTimestamp: clearedTimestamp ?? this.clearedTimestamp,
+      createdAt: createdAt ?? this.createdAt,
+      disclaimer: disclaimer ?? this.disclaimer,
     );
   }
 
@@ -75,7 +186,8 @@ class RailGuardAlertModel {
       id: "RG-$id",
       type: "vision_unattended_bag",
       title: "Luggage Alert: $objectClass (#$trackId)",
-      message: "$reason on $cameraId. Duration: ${eventDuration.toStringAsFixed(1)}s. (FOR HUMAN REVIEW ONLY)",
+      message:
+          "$reason on $cameraId. Duration: ${eventDuration.toStringAsFixed(1)}s. (FOR HUMAN REVIEW ONLY)",
       severity: sev,
       timestamp: timestamp,
       relatedTestId: cameraId,
@@ -89,16 +201,19 @@ class RailGuardApiService {
   final AuthService? _authService;
   final http.Client _client;
 
-  RailGuardApiService(this._storage, {AuthService? authService, http.Client? client})
-      : _authService = authService,
-        _client = client ?? http.Client();
+  RailGuardApiService(
+    this._storage, {
+    this._authService,
+    http.Client? client,
+  })  : _client = client ?? http.Client();
 
-  /// Default production Render URL or local fallback
-  static const String defaultBaseUrl = "https://railsafe-ai-backend.onrender.com";
+  /// Default production Render URL as single source of truth
+  static const String defaultBaseUrl = AppConstants.defaultRailGuardBackendUrl;
 
+  /// Dynamic base URL with centralized fallback to Render
   String get baseUrl {
-    final custom = _storage.getBackendUrl();
-    if (custom.isNotEmpty && !custom.contains("10.0.2.2") && !custom.contains("localhost")) {
+    final custom = _storage.getRailGuardBackendUrl().trim();
+    if (custom.isNotEmpty) {
       return custom.replaceAll(RegExp(r'/+$'), '');
     }
     return defaultBaseUrl;
@@ -112,7 +227,9 @@ class RailGuardApiService {
     }
 
     if (effectiveToken == null || effectiveToken.trim().isEmpty) {
-      throw Exception("User is not signed in. Please sign in with Firebase to access operator endpoints.");
+      throw Exception(
+        "User is not signed in. Please sign in with Firebase to access operator endpoints.",
+      );
     }
 
     return {
@@ -165,6 +282,7 @@ class RailGuardApiService {
           "ready": true,
           "firestore_connected": decoded["firestore_connected"] == true,
           "project_id": decoded["project_id"],
+          "collection": decoded["collection"],
         };
       }
       return {
@@ -185,12 +303,46 @@ class RailGuardApiService {
     String? overrideUrl,
   }) async {
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
-    final queryParams = {
+    final queryParams = <String, String>{
       "limit": limit.toString(),
       if (unreviewedOnly) "unreviewed_only": "true",
-      if (status != null) "status": status,
     };
+    if (status != null && status.isNotEmpty) {
+      queryParams["status"] = status;
+    }
+
     final uri = Uri.parse("$target/api/alerts").replace(queryParameters: queryParams);
+    final headers = await _buildHeaders();
+
+    final res = await _client
+        .get(uri, headers: headers)
+        .timeout(const Duration(seconds: 6));
+
+    if (res.statusCode == 200) {
+      try {
+        final list = jsonDecode(res.body) as List<dynamic>;
+        return list
+            .map((item) => RailGuardAlertModel.fromJson(item as Map<String, dynamic>))
+            .toList();
+      } catch (e) {
+        throw Exception("Malformed response parsing alerts: $e");
+      }
+    } else if (res.statusCode == 401) {
+      throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
+    } else if (res.statusCode == 403) {
+      throw Exception("Forbidden (HTTP 403). You do not have permission to view alerts.");
+    } else {
+      throw Exception("Failed to load alerts: HTTP ${res.statusCode}");
+    }
+  }
+
+  /// Retrieve single alert details: GET /api/alerts/{id}
+  Future<RailGuardAlertModel> getAlertDetail(
+    dynamic alertId, {
+    String? overrideUrl,
+  }) async {
+    final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
+    final uri = Uri.parse("$target/api/alerts/$alertId");
     final headers = await _buildHeaders();
 
     final res = await _client
@@ -198,16 +350,16 @@ class RailGuardApiService {
         .timeout(const Duration(seconds: 5));
 
     if (res.statusCode == 200) {
-      final list = jsonDecode(res.body) as List<dynamic>;
-      return list
-          .map((item) => RailGuardAlertModel.fromJson(item as Map<String, dynamic>))
-          .toList();
+      final decoded = jsonDecode(res.body) as Map<String, dynamic>;
+      return RailGuardAlertModel.fromJson(decoded);
     } else if (res.statusCode == 401) {
       throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
     } else if (res.statusCode == 403) {
-      throw Exception("Forbidden (HTTP 403). You do not have permission to view alerts.");
+      throw Exception("Forbidden (HTTP 403). You do not have permission to view this alert.");
+    } else if (res.statusCode == 404) {
+      throw Exception("Alert not found (HTTP 404).");
     } else {
-      throw Exception("Failed to load alerts: HTTP ${res.statusCode} - ${res.body}");
+      throw Exception("Failed to load alert details: HTTP ${res.statusCode}");
     }
   }
 
@@ -217,6 +369,12 @@ class RailGuardApiService {
     String reviewStatus, {
     String? overrideUrl,
   }) async {
+    if (reviewStatus != 'verified' && reviewStatus != 'false_alarm') {
+      throw ArgumentError(
+        "Invalid reviewStatus '$reviewStatus'. Must be either 'verified' or 'false_alarm'.",
+      );
+    }
+
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.parse("$target/api/alerts/$alertId/review");
 
@@ -224,7 +382,7 @@ class RailGuardApiService {
     final headers = await _buildHeaders();
     final res = await _client
         .patch(uri, headers: headers, body: payload)
-        .timeout(const Duration(seconds: 5));
+        .timeout(const Duration(seconds: 6));
 
     if (res.statusCode == 200) {
       final decoded = jsonDecode(res.body) as Map<String, dynamic>;
@@ -233,8 +391,10 @@ class RailGuardApiService {
       throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
     } else if (res.statusCode == 403) {
       throw Exception("Forbidden (HTTP 403). You do not have permission to submit reviews.");
+    } else if (res.statusCode == 404) {
+      throw Exception("Alert not found (HTTP 404).");
     } else {
-      throw Exception("Failed to update review status: HTTP ${res.statusCode} - ${res.body}");
+      throw Exception("Failed to update review status: HTTP ${res.statusCode}");
     }
   }
 
@@ -245,7 +405,7 @@ class RailGuardApiService {
     if (token == null || token.trim().isEmpty) {
       throw Exception("User is not signed in. Cannot generate evidence URL.");
     }
-    return "$target/api/alerts/$alertId/snapshot?token=${token.trim()}";
+    return "$target/api/alerts/$alertId/snapshot?token=${Uri.encodeComponent(token.trim())}";
   }
 
   /// Formats direct URL to stream context MP4 video clip with authorization query parameter
@@ -255,7 +415,45 @@ class RailGuardApiService {
     if (token == null || token.trim().isEmpty) {
       throw Exception("User is not signed in. Cannot generate video clip URL.");
     }
-    return "$target/api/alerts/$alertId/clip?token=${token.trim()}";
+    return "$target/api/alerts/$alertId/clip?token=${Uri.encodeComponent(token.trim())}";
+  }
+
+  /// Fetches raw snapshot JPEG bytes with Bearer ID Token in authorization header
+  Future<Uint8List> fetchSnapshotBytes(dynamic alertId, {String? overrideUrl}) async {
+    final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
+    final uri = Uri.parse("$target/api/alerts/$alertId/snapshot");
+    final headers = await _buildHeaders();
+
+    final res = await _client.get(uri, headers: headers).timeout(const Duration(seconds: 8));
+    if (res.statusCode == 200) {
+      return res.bodyBytes;
+    } else if (res.statusCode == 401) {
+      throw Exception("Unauthorized (HTTP 401): Session expired.");
+    } else if (res.statusCode == 403) {
+      throw Exception("Forbidden (HTTP 403): Insufficient permissions.");
+    } else if (res.statusCode == 404) {
+      throw Exception("Snapshot not found (HTTP 404).");
+    } else {
+      throw Exception("Failed to load snapshot: HTTP ${res.statusCode}");
+    }
+  }
+
+  /// Fetches raw video clip bytes with Bearer ID Token in authorization header
+  Future<Uint8List?> fetchClipBytes(dynamic alertId, {String? overrideUrl}) async {
+    final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
+    final uri = Uri.parse("$target/api/alerts/$alertId/clip");
+    final headers = await _buildHeaders();
+
+    final res = await _client.get(uri, headers: headers).timeout(const Duration(seconds: 15));
+    if (res.statusCode == 200) {
+      return res.bodyBytes;
+    } else if (res.statusCode == 404) {
+      return null;
+    } else if (res.statusCode == 401) {
+      throw Exception("Unauthorized (HTTP 401): Session expired.");
+    } else {
+      throw Exception("Failed to stream video clip: HTTP ${res.statusCode}");
+    }
   }
 
   /// Retrieve running false alarm rate: GET /api/alerts/stats/false-alarm-rate
@@ -277,4 +475,3 @@ class RailGuardApiService {
     _client.close();
   }
 }
-

@@ -16,6 +16,7 @@ import 'services/ble_service.dart';
 import 'services/firestore_service.dart';
 import 'services/local_storage_service.dart';
 import 'services/prediction_api_service.dart';
+import 'services/railguard_api_service.dart';
 import 'services/simulation_service.dart';
 
 void main() async {
@@ -53,6 +54,10 @@ void main() async {
   final bleService = BleService();
   final simulationService = SimulationService();
   final predictionApiService = PredictionApiService(storageService);
+  final railGuardApiService = RailGuardApiService(
+    storageService,
+    authService: authService,
+  );
 
   // Initialize core application providers
   final alertsProvider = AlertsProvider(storageService, firestoreService);
@@ -77,6 +82,7 @@ void main() async {
   runApp(
     MultiProvider(
       providers: [
+        Provider<RailGuardApiService>.value(value: railGuardApiService),
         ChangeNotifierProvider.value(value: authProvider),
         ChangeNotifierProvider.value(value: bleProvider),
         ChangeNotifierProvider.value(value: settingsProvider),

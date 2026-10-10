@@ -7,6 +7,7 @@ import '../../providers/auth_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../services/local_storage_service.dart';
 import '../../services/prediction_api_service.dart';
+import '../../services/railguard_api_service.dart';
 import '../../widgets/custom_button.dart';
 import '../../widgets/custom_text_field.dart';
 import '../auth/login_screen.dart';
@@ -23,10 +24,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _dataCharUuidController = TextEditingController();
   final _cmdCharUuidController = TextEditingController();
   final _backendUrlController = TextEditingController();
+  final _railguardUrlController = TextEditingController();
   int _staleTimeout = 4;
   bool _isTestingBackend = false;
   String? _backendHealthStatus;
   bool? _backendHealthOk;
+  bool _isTestingRailguard = false;
+  String? _railguardHealthStatus;
+  bool? _railguardHealthOk;
 
   @override
   void initState() {
@@ -36,6 +41,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _dataCharUuidController.text = settings.dataCharUuid;
     _cmdCharUuidController.text = settings.cmdCharUuid;
     _backendUrlController.text = settings.backendUrl;
+    _railguardUrlController.text = settings.railGuardBackendUrl;
     _staleTimeout = settings.staleTimeoutSeconds;
   }
 
@@ -45,6 +51,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _dataCharUuidController.dispose();
     _cmdCharUuidController.dispose();
     _backendUrlController.dispose();
+    _railguardUrlController.dispose();
     super.dispose();
   }
 
@@ -496,6 +503,170 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                     content: Text("Backend server URL updated successfully!"),
+                                    backgroundColor: AppColors.statusSafe,
+                                  ),
+                                );
+                              }
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // RailGuard Vision Backend (Render Production Cloud) Card
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceCard,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppColors.surfaceBorder),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          "RAILGUARD VISION BACKEND (RENDER)",
+                          style: GoogleFonts.orbitron(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.textSecondary,
+                            letterSpacing: 1.0,
+                          ),
+                        ),
+                        if (_railguardHealthOk != null)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: _railguardHealthOk!
+                                  ? AppColors.statusSafe.withValues(alpha: 0.15)
+                                  : AppColors.statusDanger.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: _railguardHealthOk!
+                                    ? AppColors.statusSafe
+                                    : AppColors.statusDanger,
+                              ),
+                            ),
+                            child: Text(
+                              _railguardHealthOk! ? "HEALTHY" : "OFFLINE",
+                              style: GoogleFonts.inter(
+                                color: _railguardHealthOk!
+                                    ? AppColors.statusSafe
+                                    : AppColors.statusDanger,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      "Production cloud backend hosting computer vision alerts, Firestore persistence, and operator evidence streaming. Secured by Firebase Authentication.",
+                      style: GoogleFonts.inter(
+                        color: AppColors.textSecondary,
+                        fontSize: 12.5,
+                        height: 1.35,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    CustomTextField(
+                      controller: _railguardUrlController,
+                      label: "RailGuard Production Backend URL",
+                      hint: "https://railsafe-ai-backend.onrender.com",
+                      prefixIcon: Icons.cloud_done_outlined,
+                    ),
+                    if (_railguardHealthStatus != null) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: (_railguardHealthOk == true
+                                  ? AppColors.statusSafe
+                                  : AppColors.statusDanger)
+                              .withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _railguardHealthOk == true
+                                ? AppColors.statusSafe
+                                : AppColors.statusDanger,
+                            width: 0.8,
+                          ),
+                        ),
+                        child: Text(
+                          _railguardHealthStatus!,
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            color: _railguardHealthOk == true
+                                ? AppColors.statusSafe
+                                : AppColors.statusDanger,
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: CustomButton(
+                            text: _isTestingRailguard ? "Testing..." : "Test Health & Ready",
+                            icon: Icons.network_check_rounded,
+                            isSecondary: true,
+                            height: 40,
+                            isLoading: _isTestingRailguard,
+                            onPressed: _isTestingRailguard
+                                ? null
+                                : () async {
+                                    setState(() {
+                                      _isTestingRailguard = true;
+                                      _railguardHealthStatus = null;
+                                      _railguardHealthOk = null;
+                                    });
+                                    final storage = await LocalStorageService.getInstance();
+                                    final api = RailGuardApiService(storage);
+                                    final target = _railguardUrlController.text.trim();
+                                    final healthRes = await api.checkHealth(overrideUrl: target);
+                                    final readyRes = await api.checkReadiness(overrideUrl: target);
+                                    setState(() {
+                                      _isTestingRailguard = false;
+                                      if (healthRes["success"] == true) {
+                                        _railguardHealthOk = true;
+                                        final persist = healthRes["persistence"] ?? "Cloud Firestore";
+                                        final readyStr = readyRes["ready"] == true
+                                            ? "Ready (Firestore OK)"
+                                            : "Readiness: ${readyRes["message"] ?? 'Pending'}";
+                                        _railguardHealthStatus =
+                                            "Online! Service: ${healthRes["status"] ?? 'healthy'}\n$persist | $readyStr";
+                                      } else {
+                                        _railguardHealthOk = false;
+                                        _railguardHealthStatus =
+                                            healthRes["message"]?.toString() ?? "Connection failed";
+                                      }
+                                    });
+                                  },
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: CustomButton(
+                            text: "Save URL",
+                            icon: Icons.save_rounded,
+                            height: 40,
+                            onPressed: () async {
+                              final newUrl = _railguardUrlController.text.trim();
+                              await settings.setRailGuardBackendUrl(newUrl);
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text("RailGuard backend URL updated successfully!"),
                                     backgroundColor: AppColors.statusSafe,
                                   ),
                                 );
