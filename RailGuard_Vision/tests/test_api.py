@@ -141,43 +141,113 @@ def test_health_check(test_env: dict) -> None:
     assert "/var/data" not in body_str
 
 
-def test_readiness_check(test_env: dict) -> None:
-    """Verify protected GET /ready checks Firestore access with operator credentials."""
+def test_root_info_endpoint(test_env: dict) -> None:
+    """Verify GET / returns public service discovery information."""
     client: TestClient = test_env["client"]
-    operator_token = test_env["operator_token"]
+    res = client.get("/")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["service"] == "RailGuard Vision Cloud Backend"
+    assert data["status"] == "online"
+    assert data["endpoints"]["health"] == "/health"
+    assert data["endpoints"]["readiness"] == "/ready"
 
-    # 1. Without credentials -> 401
-    res_no_auth = client.get("/ready")
-    assert res_no_auth.status_code == 401
 
-    # 2. With operator credentials -> 200
-    headers = {"Authorization": f"Bearer {operator_token}"}
-    res = client.get("/ready", headers=headers)
+def test_readiness_check_healthy_and_unhealthy(test_env: dict) -> None:
+    """Verify GET /ready correctly handles healthy and unhealthy Firestore dependencies."""
+    client: TestClient = test_env["client"]
+    repo: MockFirestoreRepository = test_env["repo"]
+
+    # 1. Healthy state -> 200 OK without requiring authentication
+    res = client.get("/ready")
     assert res.status_code == 200
     assert res.json()["status"] == "ready"
     assert res.json()["firestore_connected"] is True
 
+    # 2. Unhealthy state (simulated Firestore disconnection) -> 503 Service Unavailable
+    repo.check_readiness = lambda: False
+    res_down = client.get("/ready")
+    assert res_down.status_code == 503
+    assert "unavailable" in res_down.json()["detail"].lower()
+
+    # Restore healthy
+    repo.check_readiness = lambda: True
+
 
 def test_authentication_enforcement(test_env: dict) -> None:
-    """Verify rejection of unauthenticated or invalid token requests."""
+    """Verify rejection of unauthenticated or invalid token requests across operator endpoints."""
     client: TestClient = test_env["client"]
 
-    # 1. No token -> 401
+    # 1. No token on operator endpoint -> 401
     res = client.get("/api/alerts")
     assert res.status_code == 401
     assert "Missing authentication token" in res.json()["detail"]
 
-    # 2. Invalid token -> 401
+    # 2. Invalid token on operator endpoint -> 401
     res_bad = client.get("/api/alerts", headers={"Authorization": "Bearer bad-token"})
     assert res_bad.status_code == 401
 
-    # 3. Valid token (via dev auth bypass for test) -> 200
+    # 3. Valid operator token (via test bypass/verifier) -> 200
     res_ok = client.get(
         "/api/alerts",
         headers={"Authorization": f"Bearer {test_env['operator_token']}"},
     )
     assert res_ok.status_code == 200
     assert isinstance(res_ok.json(), list)
+
+
+def test_ingestion_agent_token_enforcement(test_env: dict) -> None:
+    """Verify that ingestion strictly requires valid RAILGUARD_AGENT_TOKEN."""
+    client: TestClient = test_env["client"]
+    correct_token = test_env["agent_token"]
+
+    fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 30
+    form_data = {
+        "event_uid": "EVT-AUTH-TEST-01",
+        "timestamp": "2026-10-11T01:00:00Z",
+        "camera_id": "CAM-01",
+        "track_id": "1",
+        "object_class": "luggage",
+        "event_duration": "10.0",
+        "reason": "Auth test",
+    }
+    files = {"snapshot": ("snap.jpg", io.BytesIO(fake_jpeg), "image/jpeg")}
+
+    # Case 1: Ingestion with NO token -> 401
+    res_no_token = client.post("/api/ingest/alerts", data=form_data, files=files)
+    assert res_no_token.status_code == 401
+    assert "Invalid camera ingestion agent token" in res_no_token.json()["detail"]
+
+    # Case 2: Ingestion with WRONG token -> 401
+    files_wrong = {"snapshot": ("snap.jpg", io.BytesIO(fake_jpeg), "image/jpeg")}
+    res_wrong_token = client.post(
+        "/api/ingest/alerts",
+        data=form_data,
+        files=files_wrong,
+        headers={"Authorization": "Bearer wrong-agent-token"},
+    )
+    assert res_wrong_token.status_code == 401
+
+    # Case 3: Ingestion with operator token (instead of agent token) -> 401 (Separation of concerns)
+    files_op = {"snapshot": ("snap.jpg", io.BytesIO(fake_jpeg), "image/jpeg")}
+    res_op_token = client.post(
+        "/api/ingest/alerts",
+        data=form_data,
+        files=files_op,
+        headers={"Authorization": f"Bearer {test_env['operator_token']}"},
+    )
+    assert res_op_token.status_code == 401
+
+    # Case 4: Ingestion with CORRECT agent token -> 201
+    files_ok = {"snapshot": ("snap.jpg", io.BytesIO(fake_jpeg), "image/jpeg")}
+    res_ok = client.post(
+        "/api/ingest/alerts",
+        data=form_data,
+        files=files_ok,
+        headers={"Authorization": f"Bearer {correct_token}"},
+    )
+    assert res_ok.status_code == 201
+
 
 
 def test_ingest_alert_valid_and_idempotent(test_env: dict) -> None:

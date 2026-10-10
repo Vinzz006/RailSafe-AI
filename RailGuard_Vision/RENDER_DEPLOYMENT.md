@@ -118,17 +118,14 @@ Click **Create Web Service**.
 
 ## 4. Verification & Health Checks
 
-Once Render displays **Live**, verify backend operation using Windows PowerShell or curl:
+Once Render displays **Live**, verify backend operation using Windows PowerShell, curl, or your browser:
 
-### Health Check (Public, Process Liveness)
+### 4.1 Process Liveness Check (Public)
 ```powershell
-curl -i https://railguard-vision-api.onrender.com/health
+curl -i https://railsafe-ai-backend.onrender.com/health
 ```
-**Expected Response:**
+**Expected Response:** `HTTP 200 OK`
 ```json
-HTTP/1.1 200 OK
-Content-Type: application/json
-
 {
   "status": "healthy",
   "service": "RailGuard Vision Cloud Backend",
@@ -138,30 +135,65 @@ Content-Type: application/json
 }
 ```
 
+### 4.2 Database Readiness Check (Public)
+```powershell
+curl -i https://railsafe-ai-backend.onrender.com/ready
+```
+**Expected Response:** `HTTP 200 OK`
+```json
+{
+  "status": "ready",
+  "firestore_connected": true,
+  "project_id": "railsafe-ai-92d9f",
+  "collection": "railguard_alerts"
+}
+```
+
+### 4.3 Protected Operator Endpoints (Requires Firebase Auth)
+If you visit `https://railsafe-ai-backend.onrender.com/api/alerts` in a browser, it will return:
+```json
+{
+  "detail": "Missing authentication token. Please provide a Bearer Firebase ID token."
+}
+```
+> [!NOTE]
+> This is **expected security behavior**, not a server bug. The browser does not send a Bearer token. Operator endpoints are designed to be accessed securely by authenticated Flutter screening officers.
+
 ---
 
 ## 5. Starting the Station Laptop Detection Agent
 
 On the laptop connected to the webcam on the railway platform:
 
-### Windows PowerShell:
+### 5.1 Step 1: Run Synthetic Ingestion Test (Recommended)
+Before running the live webcam, verify your `RAILGUARD_AGENT_TOKEN` and Render Firestore connection in one command:
 ```powershell
 cd "c:\Users\shanm\Downloads\RailSafe AI\RailGuard_Vision"
 
-# Set cloud URL and your agent token from Render
-$env:RAILGUARD_CLOUD_URL = "https://railguard-vision-api.onrender.com"
-$env:RAILGUARD_AGENT_TOKEN = "<YOUR_RAILGUARD_AGENT_TOKEN>"
+python run_agent.py --test-ingest --cloud-url "https://railsafe-ai-backend.onrender.com" --token "<PASTE_YOUR_RENDER_AGENT_TOKEN>"
+```
+This safely sends a single synthetic test alert and verifies that Render accepts it with `HTTP 201 Created` and records it in Cloud Firestore.
+
+### 5.2 Step 2: Start Real-Time Webcam Detection Agent
+```powershell
+cd "c:\Users\shanm\Downloads\RailSafe AI\RailGuard_Vision"
+
+# Set environment variables for the session
+$env:RAILGUARD_CLOUD_URL = "https://railsafe-ai-backend.onrender.com"
+$env:RAILGUARD_AGENT_TOKEN = "<PASTE_YOUR_RENDER_AGENT_TOKEN>"
 
 # Run the agent with live desktop visual display
-python run_agent.py --display
+python run_agent.py --source 0 --display
+```
+Or directly with CLI arguments:
+```powershell
+python run_agent.py --source 0 --display --cloud-url "https://railsafe-ai-backend.onrender.com" --token "<PASTE_YOUR_RENDER_AGENT_TOKEN>"
 ```
 
-### Alternatively via Batch File:
-```cmd
-cd "c:\Users\shanm\Downloads\RailSafe AI\RailGuard_Vision"
-set RAILGUARD_CLOUD_URL=https://railguard-vision-api.onrender.com
-set RAILGUARD_AGENT_TOKEN=<YOUR_RAILGUARD_AGENT_TOKEN>
-run_agent.bat
+### 5.3 Offline / Local-Only Mode (No Cloud Forwarding)
+To run the webcam and rules engine purely locally on the laptop without sending anything to the cloud:
+```powershell
+python run_agent.py --source 0 --display --offline
 ```
 
 ### Edge-to-Cloud Behavior:
@@ -170,7 +202,7 @@ run_agent.bat
 3. Evaluates luggage stationarity and nearest-person heuristics.
 4. When an unattended bag triggers `ALERT`, it logs to local SQLite and queues an upload task.
 5. The background forwarder streams the alert and snapshot JPEG to Render via `POST /api/ingest/alerts`.
-6. Render creates a document in Cloud Firestore (`railguard_alerts`).
+6. Render creates a document in Cloud Firestore (`railguard_alerts`) and persists evidence to Firebase Storage.
 7. If internet disconnects, the edge camera continues operating uninterrupted. Up to 100 alerts queue locally and retry with exponential backoff once reconnected.
 
 ---

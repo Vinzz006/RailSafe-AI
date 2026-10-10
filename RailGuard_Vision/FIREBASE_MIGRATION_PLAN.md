@@ -158,12 +158,18 @@ PermissionError: [Errno 13] Permission denied: '/var/data'
 
 ### Automated Test Results
 Test run executed with `python -m pytest -v`:
-- **Total tests**: 41
-- **Passed**: 41
+- **Total tests**: 47
+- **Passed**: 47
 - **Failed / Errors**: 0
-- **Duration**: ~10.0 seconds
+- **Duration**: ~19.87 seconds
 - **Covered suites**:
-  - `test_api.py` (health, readiness, token auth, ingestion idempotency, validation rejection, review lifecycle, evidence delivery & path traversal defense)
+  - `test_api.py` (health, root discovery, public readiness healthy & unhealthy, agent token enforcement, operator auth enforcement, ingestion idempotency, validation rejection, review lifecycle, evidence delivery & path traversal defense)
+  - `test_cloud_agent.py` (queue & upload, clear upload, queue overflow, auth rejection handling, missing token abort, precedence rules, synthetic ingest test runner)
   - `test_firestore_repository.py` (create idempotency, review updates, cleared timestamp, false alarm analytics)
-  - `test_alerts.py`, `test_cloud_agent.py`, `test_config.py`, `test_db.py`, `test_evaluation.py`, `test_persistence.py`, `test_rules.py`, `test_tracker.py`
+  - `test_alerts.py`, `test_config.py`, `test_db.py`, `test_evaluation.py`, `test_persistence.py`, `test_rules.py`, `test_tracker.py`
+
+Flutter unit test suite:
+- **Total tests**: 22
+- **Passed**: 22 (`flutter test`)
+
 

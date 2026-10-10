@@ -94,7 +94,7 @@ class RailGuardApiService {
         _client = client ?? http.Client();
 
   /// Default production Render URL or local fallback
-  static const String defaultBaseUrl = "https://railguard-vision.onrender.com";
+  static const String defaultBaseUrl = "https://railsafe-ai-backend.onrender.com";
 
   String get baseUrl {
     final custom = _storage.getBackendUrl();
@@ -110,11 +110,15 @@ class RailGuardApiService {
     if (effectiveToken == null && _authService != null) {
       effectiveToken = await _authService.getIdToken();
     }
-    effectiveToken ??= "dev-test-token";
+
+    if (effectiveToken == null || effectiveToken.trim().isEmpty) {
+      throw Exception("User is not signed in. Please sign in with Firebase to access operator endpoints.");
+    }
 
     return {
       "Content-Type": "application/json",
-      "Authorization": "Bearer $effectiveToken",
+      "Accept": "application/json",
+      "Authorization": "Bearer ${effectiveToken.trim()}",
     };
   }
 
@@ -148,6 +152,31 @@ class RailGuardApiService {
     }
   }
 
+  /// Check database and dependency readiness: GET /ready
+  Future<Map<String, dynamic>> checkReadiness({String? overrideUrl}) async {
+    final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
+    final uri = Uri.parse("$target/ready");
+
+    try {
+      final res = await _client.get(uri).timeout(const Duration(seconds: 5));
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(res.body) as Map<String, dynamic>;
+        return {
+          "ready": true,
+          "firestore_connected": decoded["firestore_connected"] == true,
+          "project_id": decoded["project_id"],
+        };
+      }
+      return {
+        "ready": false,
+        "status_code": res.statusCode,
+        "message": res.body,
+      };
+    } catch (e) {
+      return {"ready": false, "error": e.toString()};
+    }
+  }
+
   /// Retrieve active or unreviewed unattended luggage alerts: GET /api/alerts
   Future<List<RailGuardAlertModel>> getAlerts({
     int limit = 50,
@@ -174,7 +203,9 @@ class RailGuardApiService {
           .map((item) => RailGuardAlertModel.fromJson(item as Map<String, dynamic>))
           .toList();
     } else if (res.statusCode == 401) {
-      throw Exception("Unauthorized: Invalid or expired Firebase ID token.");
+      throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
+    } else if (res.statusCode == 403) {
+      throw Exception("Forbidden (HTTP 403). You do not have permission to view alerts.");
     } else {
       throw Exception("Failed to load alerts: HTTP ${res.statusCode} - ${res.body}");
     }
@@ -198,6 +229,10 @@ class RailGuardApiService {
     if (res.statusCode == 200) {
       final decoded = jsonDecode(res.body) as Map<String, dynamic>;
       return RailGuardAlertModel.fromJson(decoded);
+    } else if (res.statusCode == 401) {
+      throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
+    } else if (res.statusCode == 403) {
+      throw Exception("Forbidden (HTTP 403). You do not have permission to submit reviews.");
     } else {
       throw Exception("Failed to update review status: HTTP ${res.statusCode} - ${res.body}");
     }
@@ -206,15 +241,21 @@ class RailGuardApiService {
   /// Formats direct URL to fetch snapshot JPEG image with authorization query parameter
   Future<String> getSnapshotUrl(dynamic alertId, {String? overrideUrl}) async {
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
-    final token = await _authService?.getIdToken() ?? "dev-test-token";
-    return "$target/api/alerts/$alertId/snapshot?token=$token";
+    final token = await _authService?.getIdToken();
+    if (token == null || token.trim().isEmpty) {
+      throw Exception("User is not signed in. Cannot generate evidence URL.");
+    }
+    return "$target/api/alerts/$alertId/snapshot?token=${token.trim()}";
   }
 
   /// Formats direct URL to stream context MP4 video clip with authorization query parameter
   Future<String> getClipUrl(dynamic alertId, {String? overrideUrl}) async {
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
-    final token = await _authService?.getIdToken() ?? "dev-test-token";
-    return "$target/api/alerts/$alertId/clip?token=$token";
+    final token = await _authService?.getIdToken();
+    if (token == null || token.trim().isEmpty) {
+      throw Exception("User is not signed in. Cannot generate video clip URL.");
+    }
+    return "$target/api/alerts/$alertId/clip?token=${token.trim()}";
   }
 
   /// Retrieve running false alarm rate: GET /api/alerts/stats/false-alarm-rate
@@ -226,6 +267,8 @@ class RailGuardApiService {
     final res = await _client.get(uri, headers: headers).timeout(const Duration(seconds: 5));
     if (res.statusCode == 200) {
       return jsonDecode(res.body) as Map<String, dynamic>;
+    } else if (res.statusCode == 401) {
+      throw Exception("Session expired or unauthorized (HTTP 401). Please sign in again.");
     }
     return {"false_alarm_rate": null, "total_reviewed": 0, "false_alarms": 0};
   }
@@ -234,3 +277,4 @@ class RailGuardApiService {
     _client.close();
   }
 }
+
