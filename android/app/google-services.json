@@ -1,0 +1,69 @@
+{
+  "project_info": {
+    "project_number": "1024461430992",
+    "firebase_url": "https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "railsafe-ai-92d9f",
+    "storage_bucket": "railsafe-ai-92d9f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1024461430992:android:6f101c647e65a5e25abed5",
+        "android_client_info": {
+          "package_name": "Railsafeai.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1024461430992-6tajhqlri5u675jbfq5ngh2b9jqk7q07.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBA8gjBFkUgK58GcyQOYsEsKf28HDiZcDY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1024461430992-6tajhqlri5u675jbfq5ngh2b9jqk7q07.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1024461430992:android:6f101c647e65a5e25abed5",
+        "android_client_info": {
+          "package_name": "com.railsafe.railsafe_ai"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1024461430992-6tajhqlri5u675jbfq5ngh2b9jqk7q07.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBA8gjBFkUgK58GcyQOYsEsKf28HDiZcDY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1024461430992-6tajhqlri5u675jbfq5ngh2b9jqk7q07.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
