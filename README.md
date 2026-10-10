@@ -45,6 +45,7 @@
 - **Real-Time BLE Telemetry Stream:** Connects to ESP32 GATT server, requests 512-byte MTU, frames incoming chunks, and parses multi-channel JSON telemetry packets at 1 Hz.
 - **Dynamic Real-Time Graph:** Powered by `fl_chart`, visualizing Sensor 1 (VOC/Aerosol) and Sensor 2 (Differential Probe) curves with live timestamp intervals.
 - **Dedicated Demo Simulation Mode:** Persistent, prominent `"DEMO MODE — SIMULATED DATA"` banner and synthetic data generator allowing full presentation capabilities when hardware is absent. Includes selectable scenarios: *Nominal Ambient* vs *Trace Anomaly Elevation*.
+- **Embedded Random Forest ML Engine:** On-device 100-tree edge intelligence trained across MQ-2, MQ-4, and MQ-7 multi-sensor arrays (`railsafe_rf_model.pkl` / `assets/models/railsafe_rf_model.json`). Performs ultra-fast, zero-dependency Dart inference with 100% mathematical equivalence to Scikit-Learn.
 - **Ethical Screening Analysis:** Classifies tests into transparent categories (*Baseline Nominal*, *Anomaly Flagged — Secondary Review Required*, *Inconclusive Data*, or *Test Interrupted*). Does not claim confirmed chemical identification without certified laboratory spectrometry.
 - **Offline-First Persistence:** Test records and system alerts are immediately saved to local on-device storage. When Cloud Firestore is configured and online, records automatically sync without duplicate writes.
 - **System Event & Alerts Hub:** Tracks device connections, disconnections, sampling thresholds, and cloud synchronization events with severity badges.

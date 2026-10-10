@@ -248,6 +248,27 @@ class _TestResultScreenState extends State<TestResultScreen> {
                       "Avg Sensor 2 (Diff)",
                       "${record.metrics['sensor_2_avg'] ?? '--'} mV",
                     ),
+                    if (record.metrics.containsKey('ml_prediction')) ...[
+                      const Divider(height: 20),
+                      _buildMetaRow(
+                        "AI Screening Model",
+                        "${record.metrics['ml_model'] ?? 'Random Forest'}",
+                      ),
+                      _buildMetaRow(
+                        "ML Classification",
+                        record.metrics['ml_prediction'] == 'anomaly_synthetic'
+                            ? "ANOMALY FLAGGED"
+                            : "NOMINAL BASELINE",
+                      ),
+                      _buildMetaRow(
+                        "Anomaly Probability",
+                        "${record.metrics['ml_anomaly_prob'] ?? '--'}%",
+                      ),
+                      _buildMetaRow(
+                        "Model Confidence",
+                        "${record.metrics['ml_confidence'] ?? '--'}%",
+                      ),
+                    ],
                   ],
                 ),
               ),

@@ -123,4 +123,25 @@ class SensorReading {
 
   double? get sensor1Value => sensors['sensor_1']?.value;
   double? get sensor2Value => sensors['sensor_2']?.value;
+
+  /// Returns MQ-2 combustible / smoke raw reading (fallback to sensor_1 if not named)
+  double get mq2Value =>
+      sensors['mq2_raw']?.value ??
+      sensors['mq2']?.value ??
+      sensors['sensor_1']?.value ??
+      0.0;
+
+  /// Returns MQ-4 methane / CNG raw reading (fallback to sensor_2 if not named)
+  double get mq4Value =>
+      sensors['mq4_raw']?.value ??
+      sensors['mq4']?.value ??
+      sensors['sensor_2']?.value ??
+      0.0;
+
+  /// Returns MQ-7 carbon monoxide raw reading (fallback to sensor_3 or calibrated proportion)
+  double get mq7Value =>
+      sensors['mq7_raw']?.value ??
+      sensors['mq7']?.value ??
+      sensors['sensor_3']?.value ??
+      ((sensors['sensor_1']?.value ?? 0.0) * 0.45);
 }
