@@ -19,6 +19,23 @@ class AuthService {
   UserProfile? get currentUser => _currentUser;
   Stream<UserProfile?> get authStateChanges => _userStreamController.stream;
 
+  /// Retrieves the current user's Firebase ID token for authenticating backend requests
+  Future<String?> getIdToken({bool forceRefresh = false}) async {
+    if (isFirebaseAvailable && _auth?.currentUser != null) {
+      try {
+        return await _auth!.currentUser!.getIdToken(forceRefresh);
+      } catch (_) {}
+    }
+    // Demo officer / development token
+    if (_currentUser?.isDemoUser == true) {
+      return "DEMO_OFFICER_TOKEN";
+    }
+    if (_currentUser != null) {
+      return "dev-test-token";
+    }
+    return null;
+  }
+
   Future<void> initialize() async {
     try {
       if (Firebase.apps.isNotEmpty) {

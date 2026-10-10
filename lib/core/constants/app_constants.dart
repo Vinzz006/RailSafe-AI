@@ -14,6 +14,8 @@ class AppConstants {
   static const String keySavedAlerts = "offline_saved_alerts_json";
   static const String keyCachedUser = "cached_user_profile";
   static const String keyDemoScenario = "demo_simulation_scenario";
+  static const String keyBackendUrl = "backend_api_url";
+  static const String defaultBackendUrl = "http://10.0.2.2:8000";
 
   // Screening Assistance Disclaimer
   static const String prototypeDisclaimer =

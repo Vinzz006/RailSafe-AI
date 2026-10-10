@@ -1,5 +1,5 @@
 import '../constants/app_colors.dart';
-import '../../services/ml_inference_service.dart';
+import '../../models/prediction_response.dart';
 import 'package:flutter/material.dart';
 
 enum ScreeningStatus {
@@ -18,7 +18,7 @@ class ScreeningAnalysisResult {
   final String recommendation;
   final Map<String, dynamic> metrics;
   final bool requiresSecondaryReview;
-  final MlPredictionResult? mlPrediction;
+  final PredictionResponse? backendPrediction;
 
   const ScreeningAnalysisResult({
     required this.status,
@@ -28,17 +28,18 @@ class ScreeningAnalysisResult {
     required this.recommendation,
     required this.metrics,
     required this.requiresSecondaryReview,
-    this.mlPrediction,
+    this.backendPrediction,
   });
 }
 
 class ScreeningAnalyzer {
-  /// Evaluates received sensor telemetry using embedded Random Forest AI
-  /// and calibrated environmental thresholds without claiming chemical confirmation.
+  /// Evaluates received sensor telemetry sessions.
+  /// Combines multi-channel telemetry aggregation with authoritative Python FastAPI ML inference results.
   static ScreeningAnalysisResult analyze({
     required List<Map<String, dynamic>> readings,
     required bool isDemo,
     required bool wasInterrupted,
+    PredictionResponse? backendPrediction,
   }) {
     if (wasInterrupted) {
       return const ScreeningAnalysisResult(
@@ -89,11 +90,17 @@ class ScreeningAnalyzer {
       // Channel 1 / MQ-2
       double? val1;
       if (sensors.containsKey('mq2_raw')) {
-        val1 = (sensors['mq2_raw']?['value'] as num?)?.toDouble();
+        val1 = (sensors['mq2_raw'] is Map)
+            ? (sensors['mq2_raw']['value'] as num?)?.toDouble()
+            : (sensors['mq2_raw'] as num?)?.toDouble();
       } else if (sensors.containsKey('mq2')) {
-        val1 = (sensors['mq2']?['value'] as num?)?.toDouble();
+        val1 = (sensors['mq2'] is Map)
+            ? (sensors['mq2']['value'] as num?)?.toDouble()
+            : (sensors['mq2'] as num?)?.toDouble();
       } else if (sensors.containsKey('sensor_1')) {
-        val1 = (sensors['sensor_1']?['value'] as num?)?.toDouble();
+        val1 = (sensors['sensor_1'] is Map)
+            ? (sensors['sensor_1']['value'] as num?)?.toDouble()
+            : (sensors['sensor_1'] as num?)?.toDouble();
       }
       if (val1 != null) {
         s1Values.add(val1);
@@ -103,11 +110,17 @@ class ScreeningAnalyzer {
       // Channel 2 / MQ-4
       double? val2;
       if (sensors.containsKey('mq4_raw')) {
-        val2 = (sensors['mq4_raw']?['value'] as num?)?.toDouble();
+        val2 = (sensors['mq4_raw'] is Map)
+            ? (sensors['mq4_raw']['value'] as num?)?.toDouble()
+            : (sensors['mq4_raw'] as num?)?.toDouble();
       } else if (sensors.containsKey('mq4')) {
-        val2 = (sensors['mq4']?['value'] as num?)?.toDouble();
+        val2 = (sensors['mq4'] is Map)
+            ? (sensors['mq4']['value'] as num?)?.toDouble()
+            : (sensors['mq4'] as num?)?.toDouble();
       } else if (sensors.containsKey('sensor_2')) {
-        val2 = (sensors['sensor_2']?['value'] as num?)?.toDouble();
+        val2 = (sensors['sensor_2'] is Map)
+            ? (sensors['sensor_2']['value'] as num?)?.toDouble()
+            : (sensors['sensor_2'] as num?)?.toDouble();
       }
       if (val2 != null) {
         s2Values.add(val2);
@@ -117,11 +130,14 @@ class ScreeningAnalyzer {
       // Channel 3 / MQ-7
       double? val3;
       if (sensors.containsKey('mq7_raw')) {
-        val3 = (sensors['mq7_raw']?['value'] as num?)?.toDouble();
+        val3 = (sensors['mq7_raw'] is Map)
+            ? (sensors['mq7_raw']['value'] as num?)?.toDouble()
+            : (sensors['mq7_raw'] as num?)?.toDouble();
       } else if (sensors.containsKey('mq7')) {
-        val3 = (sensors['mq7']?['value'] as num?)?.toDouble();
+        val3 = (sensors['mq7'] is Map)
+            ? (sensors['mq7']['value'] as num?)?.toDouble()
+            : (sensors['mq7'] as num?)?.toDouble();
       } else if (val1 != null) {
-        // Calibrated baseline correlation when probe has 2 channels
         val3 = val1 * 0.45;
       }
       if (val3 != null) {
@@ -138,23 +154,28 @@ class ScreeningAnalyzer {
     final mq4Peak = mq4Values.isNotEmpty ? mq4Values.reduce((a, b) => a > b ? a : b) : s2Max;
     final mq7Peak = mq7Values.isNotEmpty ? mq7Values.reduce((a, b) => a > b ? a : b) : (s1Max * 0.45);
 
-    // Run embedded Random Forest ML Inference
-    final mlResult = MlInferenceService().predict(
-      mq2: mq2Peak,
-      mq4: mq4Peak,
-      mq7: mq7Peak,
-    );
-
-    // Decision logic:
-    // When the trained Random Forest model is active, it serves as primary intelligent evaluator.
-    // If running in uninitialized fallback mode, legacy threshold guard is used.
     final bool anomalyDetected;
-    if (MlInferenceService().isLoaded) {
-      anomalyDetected = mlResult.isAnomaly;
+    final String modelName;
+    final String mlPredictionLabel;
+    final double mlAnomalyProbPercent;
+    final double mlConfidence;
+
+    if (backendPrediction != null) {
+      // Authoritative inference from Python FastAPI Backend
+      anomalyDetected = backendPrediction.isAnomaly;
+      modelName = "Python FastAPI Backend (RandomForest v${backendPrediction.modelVersion})";
+      mlPredictionLabel = backendPrediction.label;
+      mlAnomalyProbPercent = double.parse((backendPrediction.anomalyScore * 100).toStringAsFixed(1));
+      mlConfidence = double.parse(backendPrediction.confidence.toStringAsFixed(1));
     } else {
+      // Offline fallback threshold guard when backend is unreachable
       final s1ThresholdExceeded = s1Max > 280.0;
       final s2ThresholdExceeded = s2Max > 140.0;
       anomalyDetected = s1ThresholdExceeded || s2ThresholdExceeded;
+      modelName = "Prediction service unavailable (Safety threshold only)";
+      mlPredictionLabel = "prediction_service_unavailable";
+      mlAnomalyProbPercent = anomalyDetected ? 95.0 : 0.0;
+      mlConfidence = 0.0;
     }
 
     final metrics = {
@@ -166,10 +187,11 @@ class ScreeningAnalyzer {
       "mq2_peak": double.parse(mq2Peak.toStringAsFixed(1)),
       "mq4_peak": double.parse(mq4Peak.toStringAsFixed(1)),
       "mq7_peak": double.parse(mq7Peak.toStringAsFixed(1)),
-      "ml_model": mlResult.modelName,
-      "ml_prediction": mlResult.label,
-      "ml_anomaly_prob": double.parse((mlResult.anomalyProbability * 100).toStringAsFixed(1)),
-      "ml_confidence": double.parse(mlResult.confidence.toStringAsFixed(1)),
+      "ml_model": modelName,
+      "ml_prediction": mlPredictionLabel,
+      "ml_anomaly_prob": mlAnomalyProbPercent,
+      "ml_confidence": mlConfidence,
+      if (backendPrediction != null) "backend_inference_ts": backendPrediction.inferenceTimestamp.toIso8601String(),
     };
 
     if (isDemo) {
@@ -178,53 +200,61 @@ class ScreeningAnalyzer {
           status: ScreeningStatus.demoSimulation,
           title: "Demo Simulation — Anomaly Scenario",
           description:
-              "Random Forest AI identified anomalous pattern (${(mlResult.anomalyProbability * 100).toStringAsFixed(1)}% anomaly probability, Peak S1: ${s1Max.toStringAsFixed(1)}, S2: ${s2Max.toStringAsFixed(1)}).",
+              "Backend AI identified anomalous pattern ($mlAnomalyProbPercent% anomaly probability, Peak S1: ${s1Max.toStringAsFixed(1)}, S2: ${s2Max.toStringAsFixed(1)}).",
           statusColor: AppColors.statusWarning,
           recommendation: "Demonstration mode only. In field operations, secondary review would be requested.",
           metrics: metrics,
           requiresSecondaryReview: true,
-          mlPrediction: mlResult,
+          backendPrediction: backendPrediction,
         );
       } else {
         return ScreeningAnalysisResult(
           status: ScreeningStatus.demoSimulation,
           title: "Demo Simulation — Nominal Baseline",
           description:
-              "Random Forest AI verified nominal ambient baseline (${(mlResult.normalProbability * 100).toStringAsFixed(1)}% baseline confidence).",
+              "Backend AI verified nominal ambient baseline ($mlConfidence% baseline confidence).",
           statusColor: AppColors.statusSafe,
           recommendation: "Demonstration mode. System telemetry pipeline operating nominally.",
           metrics: metrics,
           requiresSecondaryReview: false,
-          mlPrediction: mlResult,
+          backendPrediction: backendPrediction,
         );
       }
     }
 
     if (anomalyDetected) {
+      final desc = backendPrediction != null
+          ? "Python Backend AI flagged sensor deviation from baseline with $mlAnomalyProbPercent% anomaly probability (Peak S1: ${s1Max.toStringAsFixed(1)}, Peak S2: ${s2Max.toStringAsFixed(1)})."
+          : "Prediction service unavailable. Calibrated threshold exceeded (Peak S1: ${s1Max.toStringAsFixed(1)}, Peak S2: ${s2Max.toStringAsFixed(1)}). Secondary review recommended.";
       return ScreeningAnalysisResult(
         status: ScreeningStatus.anomalyFlagged,
-        title: "Anomaly Flagged — Secondary Review Required",
-        description:
-            "Random Forest AI flagged sensor deviation from baseline with ${(mlResult.anomalyProbability * 100).toStringAsFixed(1)}% anomaly probability (Peak S1: ${s1Max.toStringAsFixed(1)}, Peak S2: ${s2Max.toStringAsFixed(1)}).",
+        title: backendPrediction != null
+            ? "Anomaly Flagged — Secondary Review Required"
+            : "Threshold Exceeded — Prediction Service Offline",
+        description: desc,
         statusColor: AppColors.statusDanger,
         recommendation:
             "Conduct standard baggage inspection or secondary screening protocol in accordance with railway safety guidelines. Do not conclude substance identity without laboratory spectrometry.",
         metrics: metrics,
         requiresSecondaryReview: true,
-        mlPrediction: mlResult,
+        backendPrediction: backendPrediction,
       );
     }
 
+    final desc = backendPrediction != null
+        ? "Python Backend AI confirmed ambient baseline with $mlConfidence% confidence throughout sampling interval."
+        : "Prediction service unavailable. Telemetry values remained below safety thresholds during sampling.";
     return ScreeningAnalysisResult(
       status: ScreeningStatus.normalBaseline,
-      title: "Baseline Nominal — No Anomaly Detected",
-      description:
-          "Random Forest AI confirmed ambient baseline with ${(mlResult.normalProbability * 100).toStringAsFixed(1)}% confidence throughout sampling interval.",
+      title: backendPrediction != null
+          ? "Baseline Nominal — No Anomaly Detected"
+          : "Thresholds Nominal — Prediction Service Offline",
+      description: desc,
       statusColor: AppColors.statusSafe,
       recommendation: "Screening completed. Baggage/sample cleared under current prototype screening parameters.",
       metrics: metrics,
       requiresSecondaryReview: false,
-      mlPrediction: mlResult,
+      backendPrediction: backendPrediction,
     );
   }
 }

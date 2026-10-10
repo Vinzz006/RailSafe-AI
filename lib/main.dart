@@ -15,7 +15,7 @@ import 'services/auth_service.dart';
 import 'services/ble_service.dart';
 import 'services/firestore_service.dart';
 import 'services/local_storage_service.dart';
-import 'services/ml_inference_service.dart';
+import 'services/prediction_api_service.dart';
 import 'services/simulation_service.dart';
 
 void main() async {
@@ -43,9 +43,6 @@ void main() async {
     debugPrint("[FIREBASE] Optional cloud initialization: $e (Operating in Offline Local Storage mode)");
   }
 
-  // Initialize embedded Random Forest AI inference engine
-  await MlInferenceService().initialize();
-
   // Initialize service dependencies
   final authService = AuthService(storageService);
   await authService.initialize();
@@ -55,6 +52,7 @@ void main() async {
 
   final bleService = BleService();
   final simulationService = SimulationService();
+  final predictionApiService = PredictionApiService(storageService);
 
   // Initialize core application providers
   final alertsProvider = AlertsProvider(storageService, firestoreService);
@@ -64,6 +62,8 @@ void main() async {
     storageService,
     firestoreService,
     alertsProvider,
+    predictionApiService,
+    authService,
   );
   final authProvider = AuthProvider(authService, firestoreService);
   final bleProvider = BleProvider(bleService);

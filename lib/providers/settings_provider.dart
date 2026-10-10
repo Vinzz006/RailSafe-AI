@@ -16,6 +16,7 @@ class SettingsProvider extends ChangeNotifier {
   late String _dataCharUuid;
   late String _cmdCharUuid;
   late int _staleTimeoutSeconds;
+  late String _backendUrl;
 
   SettingsProvider(
     this._storage,
@@ -29,6 +30,7 @@ class SettingsProvider extends ChangeNotifier {
     _dataCharUuid = _storage.dataCharUuid;
     _cmdCharUuid = _storage.cmdCharUuid;
     _staleTimeoutSeconds = _storage.staleTimeoutSeconds;
+    _backendUrl = _storage.getBackendUrl();
 
     // Apply saved UUIDs to BleService
     _bleService.configureUuids(
@@ -45,7 +47,14 @@ class SettingsProvider extends ChangeNotifier {
   String get dataCharUuid => _dataCharUuid;
   String get cmdCharUuid => _cmdCharUuid;
   int get staleTimeoutSeconds => _staleTimeoutSeconds;
+  String get backendUrl => _backendUrl;
   bool get isFirebaseConfigured => _firestoreService.isFirestoreAvailable;
+
+  Future<void> setBackendUrl(String url) async {
+    _backendUrl = url.trim();
+    await _storage.setBackendUrl(_backendUrl);
+    notifyListeners();
+  }
 
   Future<void> setDemoMode(bool value) async {
     _isDemoModeEnabled = value;

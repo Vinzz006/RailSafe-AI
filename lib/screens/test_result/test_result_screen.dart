@@ -256,9 +256,11 @@ class _TestResultScreenState extends State<TestResultScreen> {
                       ),
                       _buildMetaRow(
                         "ML Classification",
-                        record.metrics['ml_prediction'] == 'anomaly_synthetic'
-                            ? "ANOMALY FLAGGED"
-                            : "NOMINAL BASELINE",
+                        record.metrics['ml_prediction'] == 'prediction_service_unavailable'
+                            ? "SERVICE UNAVAILABLE"
+                            : (record.metrics['ml_prediction'] == 'anomaly_synthetic' || record.metrics['ml_prediction'] == 'anomaly'
+                                ? "ANOMALY FLAGGED"
+                                : "NOMINAL BASELINE"),
                       ),
                       _buildMetaRow(
                         "Anomaly Probability",

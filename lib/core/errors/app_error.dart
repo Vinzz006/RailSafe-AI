@@ -28,3 +28,8 @@ class AuthException extends AppError {
 class SyncException extends AppError {
   SyncException(super.message, {super.code, super.details});
 }
+
+class BackendPredictionException extends AppError {
+  final int? statusCode;
+  BackendPredictionException(super.message, {this.statusCode, super.code, super.details});
+}

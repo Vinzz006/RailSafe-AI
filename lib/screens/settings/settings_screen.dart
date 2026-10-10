@@ -5,6 +5,8 @@ import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_constants.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/settings_provider.dart';
+import '../../services/local_storage_service.dart';
+import '../../services/prediction_api_service.dart';
 import '../../widgets/custom_button.dart';
 import '../../widgets/custom_text_field.dart';
 import '../auth/login_screen.dart';
@@ -20,7 +22,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _serviceUuidController = TextEditingController();
   final _dataCharUuidController = TextEditingController();
   final _cmdCharUuidController = TextEditingController();
+  final _backendUrlController = TextEditingController();
   int _staleTimeout = 4;
+  bool _isTestingBackend = false;
+  String? _backendHealthStatus;
+  bool? _backendHealthOk;
 
   @override
   void initState() {
@@ -29,6 +35,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _serviceUuidController.text = settings.serviceUuid;
     _dataCharUuidController.text = settings.dataCharUuid;
     _cmdCharUuidController.text = settings.cmdCharUuid;
+    _backendUrlController.text = settings.backendUrl;
     _staleTimeout = settings.staleTimeoutSeconds;
   }
 
@@ -37,6 +44,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _serviceUuidController.dispose();
     _dataCharUuidController.dispose();
     _cmdCharUuidController.dispose();
+    _backendUrlController.dispose();
     super.dispose();
   }
 
@@ -336,6 +344,166 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       isSecondary: true,
                       height: 40,
                       onPressed: () => _showFirebaseSetupGuide(context),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // Python Backend Server Configuration Card
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceCard,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppColors.surfaceBorder),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          "PYTHON BACKEND INFERENCE SERVER",
+                          style: GoogleFonts.orbitron(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.textSecondary,
+                            letterSpacing: 1.0,
+                          ),
+                        ),
+                        if (_backendHealthOk != null)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: _backendHealthOk!
+                                  ? AppColors.statusSafe.withValues(alpha: 0.15)
+                                  : AppColors.statusDanger.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: _backendHealthOk!
+                                    ? AppColors.statusSafe
+                                    : AppColors.statusDanger,
+                              ),
+                            ),
+                            child: Text(
+                              _backendHealthOk! ? "HEALTHY" : "OFFLINE",
+                              style: GoogleFonts.inter(
+                                color: _backendHealthOk!
+                                    ? AppColors.statusSafe
+                                    : AppColors.statusDanger,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      "Offloads Random Forest ML inference (MQ-2, MQ-4, MQ-7) from Android to a secure FastAPI server. Protected by Firebase Bearer tokens.",
+                      style: GoogleFonts.inter(
+                        color: AppColors.textSecondary,
+                        fontSize: 12.5,
+                        height: 1.35,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    CustomTextField(
+                      controller: _backendUrlController,
+                      label: "Backend Server URL",
+                      hint: "http://10.0.2.2:8000 or https://cloudrun.app",
+                      prefixIcon: Icons.dns_outlined,
+                    ),
+                    if (_backendHealthStatus != null) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: (_backendHealthOk == true
+                                  ? AppColors.statusSafe
+                                  : AppColors.statusDanger)
+                              .withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _backendHealthOk == true
+                                ? AppColors.statusSafe
+                                : AppColors.statusDanger,
+                            width: 0.8,
+                          ),
+                        ),
+                        child: Text(
+                          _backendHealthStatus!,
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            color: _backendHealthOk == true
+                                ? AppColors.statusSafe
+                                : AppColors.statusDanger,
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: CustomButton(
+                            text: _isTestingBackend ? "Testing..." : "Test Connection",
+                            icon: Icons.network_check_rounded,
+                            isSecondary: true,
+                            height: 40,
+                            isLoading: _isTestingBackend,
+                            onPressed: _isTestingBackend
+                                ? null
+                                : () async {
+                                    setState(() {
+                                      _isTestingBackend = true;
+                                      _backendHealthStatus = null;
+                                      _backendHealthOk = null;
+                                    });
+                                    final storage = await LocalStorageService.getInstance();
+                                    final api = PredictionApiService(storage);
+                                    final res = await api.checkHealth(
+                                      overrideUrl: _backendUrlController.text.trim(),
+                                    );
+                                    setState(() {
+                                      _isTestingBackend = false;
+                                      if (res["success"] == true) {
+                                        _backendHealthOk = true;
+                                        _backendHealthStatus =
+                                            "Online! Model: ${res["model_name"]} (v${res["model_version"]})";
+                                      } else {
+                                        _backendHealthOk = false;
+                                        _backendHealthStatus =
+                                            res["message"]?.toString() ?? "Connection failed";
+                                      }
+                                    });
+                                  },
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: CustomButton(
+                            text: "Save URL",
+                            icon: Icons.save_rounded,
+                            height: 40,
+                            onPressed: () async {
+                              final newUrl = _backendUrlController.text.trim();
+                              await settings.setBackendUrl(newUrl);
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text("Backend server URL updated successfully!"),
+                                    backgroundColor: AppColors.statusSafe,
+                                  ),
+                                );
+                              }
+                            },
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),

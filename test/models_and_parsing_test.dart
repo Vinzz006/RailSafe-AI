@@ -1,10 +1,9 @@
-import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:railsafe_ai/core/utils/screening_analyzer.dart';
 import 'package:railsafe_ai/models/app_alert.dart';
+import 'package:railsafe_ai/models/prediction_response.dart';
 import 'package:railsafe_ai/models/sensor_reading.dart';
 import 'package:railsafe_ai/models/test_record.dart';
-import 'package:railsafe_ai/services/ml_inference_service.dart';
 
 void main() {
   group('SensorReading JSON Parsing Tests', () {
@@ -79,7 +78,7 @@ void main() {
   });
 
   group('ScreeningAnalyzer Rule Logic Tests', () {
-    test('Flags anomaly for secondary review when peak threshold is exceeded', () {
+    test('Flags anomaly for secondary review when peak threshold is exceeded (offline guard)', () {
       final readings = [
         {
           "sensors": {
@@ -115,11 +114,12 @@ void main() {
 
       expect(result.status, equals(ScreeningStatus.anomalyFlagged));
       expect(result.requiresSecondaryReview, isTrue);
-      expect(result.title, contains("Anomaly Flagged"));
+      expect(result.title, contains("Threshold Exceeded"));
       expect(result.metrics['sensor_1_max'], equals(320.0));
+      expect(result.metrics['ml_prediction'], equals("prediction_service_unavailable"));
     });
 
-    test('Identifies nominal baseline when all readings stay below threshold', () {
+    test('Identifies nominal baseline when all readings stay below threshold without backend', () {
       final readings = [
         {
           "sensors": {
@@ -149,7 +149,8 @@ void main() {
 
       expect(result.status, equals(ScreeningStatus.normalBaseline));
       expect(result.requiresSecondaryReview, isFalse);
-      expect(result.title, contains("Baseline Nominal"));
+      expect(result.title, contains("Prediction Service Offline"));
+      expect(result.metrics['ml_prediction'], equals("prediction_service_unavailable"));
     });
 
     test('Marks test as interrupted when interrupted flag is true', () {
@@ -228,7 +229,7 @@ void main() {
     });
   });
 
-  group('Embedded Random Forest ML Model & Multi-Channel Tests', () {
+  group('Python Backend ML Prediction Models & Integration Tests', () {
     test('SensorReading MQ2, MQ4, and MQ7 channel resolution', () {
       final json = {
         "deviceId": "RAILSAFE-ESP32-01",
@@ -249,31 +250,45 @@ void main() {
       expect(reading.mq7Value, equals(65.0));
     });
 
-    test('MlInferenceService executes 100-tree Random Forest predictions accurately', () {
-      final modelFile = File('assets/models/railsafe_rf_model.json');
-      expect(modelFile.existsSync(), isTrue, reason: 'Model asset file should exist');
+    test('PredictionResponse parses backend JSON payload accurately', () {
+      final json = {
+        "deviceId": "railsafe-esp32-01",
+        "sequence": 42,
+        "prediction": "anomaly",
+        "label": "anomaly_synthetic",
+        "anomalyScore": 0.98,
+        "normalScore": 0.02,
+        "confidence": 98.0,
+        "reviewRequired": true,
+        "modelVersion": "1.0.0",
+        "inferenceTimestamp": "2026-10-10T12:00:00Z",
+        "inputFeatures": {
+          "mq2_raw": 100.0,
+          "mq4_raw": 100.0,
+          "mq7_raw": 100.0
+        },
+        "userId": "test-officer-id"
+      };
 
-      final mlService = MlInferenceService();
-      mlService.loadFromString(modelFile.readAsStringSync());
+      final pred = PredictionResponse.fromJson(json);
 
-      expect(mlService.isLoaded, isTrue);
-      expect(mlService.estimatorCount, equals(100));
-      expect(mlService.features, containsAll(['mq2_raw', 'mq4_raw', 'mq7_raw']));
-
-      // Test calibrated normal baseline sample
-      final normalPred = mlService.predict(mq2: 700.0, mq4: 1000.0, mq7: 80.0);
-      expect(normalPred.label, equals('normal_synthetic'));
-      expect(normalPred.isAnomaly, isFalse);
-      expect(normalPred.normalProbability, greaterThan(0.90));
-
-      // Test elevated anomaly sample
-      final anomalyPred = mlService.predict(mq2: 100.0, mq4: 100.0, mq7: 100.0);
-      expect(anomalyPred.label, equals('anomaly_synthetic'));
-      expect(anomalyPred.isAnomaly, isTrue);
-      expect(anomalyPred.anomalyProbability, greaterThan(0.90));
+      expect(pred.deviceId, equals("railsafe-esp32-01"));
+      expect(pred.sequence, equals(42));
+      expect(pred.prediction, equals("anomaly"));
+      expect(pred.label, equals("anomaly_synthetic"));
+      expect(pred.anomalyScore, equals(0.98));
+      expect(pred.normalScore, equals(0.02));
+      expect(pred.confidence, equals(98.0));
+      expect(pred.reviewRequired, isTrue);
+      expect(pred.isAnomaly, isTrue);
+      expect(pred.modelVersion, equals("1.0.0"));
+      expect(pred.inputFeatures['mq2_raw'], equals(100.0));
+      expect(pred.inputFeatures['mq4_raw'], equals(100.0));
+      expect(pred.inputFeatures['mq7_raw'], equals(100.0));
+      expect(pred.userId, equals("test-officer-id"));
     });
 
-    test('ScreeningAnalyzer integrates ML model predictions into test evaluation', () {
+    test('ScreeningAnalyzer integrates authoritative backend ML response for nominal baseline', () {
       final readings = [
         {
           "sensors": {
@@ -298,16 +313,87 @@ void main() {
         },
       ];
 
+      final backendPrediction = PredictionResponse(
+        deviceId: "RAILSAFE-ESP32-01",
+        sequence: 3,
+        prediction: "nominal",
+        label: "normal_synthetic",
+        anomalyScore: 0.02,
+        normalScore: 0.98,
+        confidence: 98.0,
+        reviewRequired: false,
+        modelVersion: "1.0.0",
+        inferenceTimestamp: DateTime.parse("2026-10-10T12:00:00Z"),
+        inputFeatures: {"mq2_raw": 710.0, "mq4_raw": 1020.0, "mq7_raw": 82.0},
+      );
+
       final result = ScreeningAnalyzer.analyze(
         readings: readings,
         isDemo: false,
         wasInterrupted: false,
+        backendPrediction: backendPrediction,
       );
 
       expect(result.status, equals(ScreeningStatus.normalBaseline));
-      expect(result.metrics.containsKey('ml_prediction'), isTrue);
+      expect(result.requiresSecondaryReview, isFalse);
       expect(result.metrics['ml_prediction'], equals('normal_synthetic'));
-      expect(result.metrics.containsKey('ml_confidence'), isTrue);
+      expect(result.metrics['ml_model'], contains('RandomForest v1.0.0'));
+      expect(result.metrics['ml_anomaly_prob'], equals(2.0));
+      expect(result.metrics['ml_confidence'], equals(98.0));
+    });
+
+    test('ScreeningAnalyzer integrates authoritative backend ML response for flagged anomaly', () {
+      final readings = [
+        {
+          "sensors": {
+            "mq2_raw": {"value": 100.0},
+            "mq4_raw": {"value": 100.0},
+            "mq7_raw": {"value": 100.0},
+          }
+        },
+        {
+          "sensors": {
+            "mq2_raw": {"value": 95.0},
+            "mq4_raw": {"value": 98.0},
+            "mq7_raw": {"value": 99.0},
+          }
+        },
+        {
+          "sensors": {
+            "mq2_raw": {"value": 102.0},
+            "mq4_raw": {"value": 101.0},
+            "mq7_raw": {"value": 100.0},
+          }
+        },
+      ];
+
+      final backendPrediction = PredictionResponse(
+        deviceId: "RAILSAFE-ESP32-01",
+        sequence: 3,
+        prediction: "anomaly",
+        label: "anomaly_synthetic",
+        anomalyScore: 0.96,
+        normalScore: 0.04,
+        confidence: 96.0,
+        reviewRequired: true,
+        modelVersion: "1.0.0",
+        inferenceTimestamp: DateTime.parse("2026-10-10T12:00:00Z"),
+        inputFeatures: {"mq2_raw": 102.0, "mq4_raw": 101.0, "mq7_raw": 100.0},
+      );
+
+      final result = ScreeningAnalyzer.analyze(
+        readings: readings,
+        isDemo: false,
+        wasInterrupted: false,
+        backendPrediction: backendPrediction,
+      );
+
+      expect(result.status, equals(ScreeningStatus.anomalyFlagged));
+      expect(result.requiresSecondaryReview, isTrue);
+      expect(result.metrics['ml_prediction'], equals('anomaly_synthetic'));
+      expect(result.title, contains('Anomaly Flagged'));
+      expect(result.metrics['ml_anomaly_prob'], equals(96.0));
+      expect(result.metrics['ml_model'], contains('RandomForest v1.0.0'));
     });
   });
 }

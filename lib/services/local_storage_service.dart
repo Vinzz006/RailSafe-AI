@@ -56,6 +56,13 @@ class LocalStorageService {
     await _prefs.setInt(AppConstants.keyStaleTimeoutSec, seconds);
   }
 
+  // --- Python Backend Server URL ---
+  String getBackendUrl() =>
+      _prefs.getString(AppConstants.keyBackendUrl) ?? AppConstants.defaultBackendUrl;
+  Future<void> setBackendUrl(String url) async {
+    await _prefs.setString(AppConstants.keyBackendUrl, url.trim());
+  }
+
   // --- Offline Tests Persistence ---
   List<TestRecord> getSavedTests() {
     final raw = _prefs.getString(AppConstants.keySavedTests);

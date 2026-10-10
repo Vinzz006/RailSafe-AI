@@ -4,11 +4,14 @@ import 'package:uuid/uuid.dart';
 import '../core/constants/ble_constants.dart';
 import '../core/utils/screening_analyzer.dart';
 import '../models/app_alert.dart';
+import '../models/prediction_response.dart';
 import '../models/sensor_reading.dart';
 import '../models/test_record.dart';
+import '../services/auth_service.dart';
 import '../services/ble_service.dart';
 import '../services/firestore_service.dart';
 import '../services/local_storage_service.dart';
+import '../services/prediction_api_service.dart';
 import '../services/simulation_service.dart';
 import 'alerts_provider.dart';
 
@@ -18,6 +21,8 @@ class TestProvider extends ChangeNotifier {
   final LocalStorageService _storage;
   final FirestoreService _firestore;
   final AlertsProvider _alertsProvider;
+  final PredictionApiService _predictionApi;
+  final AuthService _authService;
 
   bool _isTesting = false;
   String _testMode = 'hardware'; // 'hardware' or 'demo'
@@ -33,6 +38,11 @@ class TestProvider extends ChangeNotifier {
   List<TestRecord> _savedTests = [];
   bool _isSyncing = false;
 
+  bool _isPredicting = false;
+  String? _predictionError;
+  int _lastPredictedSequence = -1;
+  PredictionResponse? _lastBackendPrediction;
+
   StreamSubscription? _bleReadingSub;
   StreamSubscription? _simReadingSub;
   StreamSubscription? _bleStatusSub;
@@ -45,6 +55,8 @@ class TestProvider extends ChangeNotifier {
     this._storage,
     this._firestore,
     this._alertsProvider,
+    this._predictionApi,
+    this._authService,
   ) {
     _loadSavedTests();
     _listenToBleStatus();
@@ -62,6 +74,9 @@ class TestProvider extends ChangeNotifier {
   ScreeningAnalysisResult? get lastAnalysisResult => _lastAnalysisResult;
   List<TestRecord> get savedTests => _savedTests;
   bool get isSyncing => _isSyncing;
+  bool get isPredicting => _isPredicting;
+  String? get predictionError => _predictionError;
+  PredictionResponse? get lastBackendPrediction => _lastBackendPrediction;
 
   void _loadSavedTests() {
     _savedTests = _storage.getSavedTests();
@@ -89,6 +104,9 @@ class TestProvider extends ChangeNotifier {
     _latestReading = null;
     _lastCompletedTest = null;
     _lastAnalysisResult = null;
+    _lastBackendPrediction = null;
+    _predictionError = null;
+    _lastPredictedSequence = -1;
     _isTesting = true;
 
     // Start elapsed duration stopwatch timer
@@ -152,7 +170,7 @@ class TestProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Stops current test session and computes screening analysis
+  /// Stops current test session, calls Python backend for inference, and records screening analysis
   Future<TestRecord?> stopTest({required String userId, bool wasInterrupted = false}) async {
     if (!_isTesting) return _lastCompletedTest;
 
@@ -174,11 +192,69 @@ class TestProvider extends ChangeNotifier {
 
     final rawJsonList = _currentSessionReadings.map((r) => r.toJson()).toList();
 
-    // Run safe screening analysis
+    PredictionResponse? backendPrediction;
+
+    // Call Python backend inference if session has valid readings and was not interrupted
+    if (!wasInterrupted && _currentSessionReadings.length >= 3) {
+      _isPredicting = true;
+      notifyListeners();
+
+      try {
+        final lastReading = _currentSessionReadings.last;
+        final seq = lastReading.sequence;
+
+        // Prevent duplicate inference requests for the same sequence
+        if (seq != _lastPredictedSequence) {
+          _lastPredictedSequence = seq;
+
+          double mq2Peak = 0.0;
+          double mq4Peak = 0.0;
+          double mq7Peak = 0.0;
+
+          for (final r in _currentSessionReadings) {
+            if (r.mq2Value > mq2Peak) mq2Peak = r.mq2Value;
+            if (r.mq4Value > mq4Peak) mq4Peak = r.mq4Value;
+            if (r.mq7Value > mq7Peak) mq7Peak = r.mq7Value;
+          }
+
+          final token = await _authService.getIdToken() ?? "DEMO_OFFICER_TOKEN";
+          backendPrediction = await _predictionApi.predict(
+            deviceId: deviceId,
+            sequence: seq,
+            timestamp: completedAt,
+            mq2: mq2Peak,
+            mq4: mq4Peak,
+            mq7: mq7Peak,
+            idToken: token,
+          );
+          _lastBackendPrediction = backendPrediction;
+          _predictionError = null;
+        } else {
+          backendPrediction = _lastBackendPrediction;
+        }
+      } catch (e) {
+        debugPrint("[TEST_PROVIDER] Backend prediction notice: $e");
+        _predictionError = e.toString();
+        await _alertsProvider.addAlert(
+          type: "backend_prediction_error",
+          title: "Prediction Service Notice",
+          message: "Unable to reach Python backend: $e. Applied calibrated fallback threshold guard.",
+          severity: AlertSeverity.warning,
+          userId: userId,
+          relatedTestId: _currentTestId,
+        );
+      } finally {
+        _isPredicting = false;
+        notifyListeners();
+      }
+    }
+
+    // Run safe screening analysis incorporating backend ML prediction
     final analysis = ScreeningAnalyzer.analyze(
       readings: rawJsonList,
       isDemo: _testMode == 'demo',
       wasInterrupted: wasInterrupted,
+      backendPrediction: backendPrediction,
     );
     _lastAnalysisResult = analysis;
 
