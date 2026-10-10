@@ -31,9 +31,10 @@
 #define DATA_CHAR_UUID      "12345678-1234-5678-1234-56789abcdef1"
 #define CMD_CHAR_UUID       "12345678-1234-5678-1234-56789abcdef2"
 
-// Analog sensor pin configuration (Example pins on ESP32)
-#define PIN_SENSOR_1 34  // Analog channel for VOC / Gas sensor probe
-#define PIN_SENSOR_2 35  // Analog channel for Differential Ion / Thermal probe
+// Analog sensor pin configuration (ESP32 DevKit V1 physical ADC1 channels)
+#define PIN_MQ2 32       // ADC1_CH4: MQ-2 Combustible Gas / Smoke
+#define PIN_MQ4 34       // ADC1_CH6: MQ-4 Natural Gas / Methane (Input-only)
+#define PIN_MQ7 35       // ADC1_CH7: MQ-7 Carbon Monoxide (Input-only)
 #define LED_STATUS_PIN 2 // Built-in indicator LED
 
 BLEServer* pServer = NULL;
@@ -94,13 +95,23 @@ void setup() {
   Serial.println("=========================================");
 
   pinMode(LED_STATUS_PIN, OUTPUT);
-  pinMode(PIN_SENSOR_1, INPUT);
-  pinMode(PIN_SENSOR_2, INPUT);
+  pinMode(PIN_MQ2, INPUT);
+  pinMode(PIN_MQ4, INPUT);
+  pinMode(PIN_MQ7, INPUT);
+
+  // Configure ADC resolution explicitly (12-bit: 0 - 4095)
+  analogReadResolution(12);
+
+  // Configure ADC input attenuation explicitly
+  // ADC_11db provides full-scale input voltage range up to ~3.3V (ESP32 ADC1 max range)
+  analogSetPinAttenuation(PIN_MQ2, ADC_11db);
+  analogSetPinAttenuation(PIN_MQ4, ADC_11db);
+  analogSetPinAttenuation(PIN_MQ7, ADC_11db);
 
   // Initialize BLE Device
   BLEDevice::init(DEVICE_NAME);
 
-  // Optional: Set MTU to 512 for full JSON packets
+  // Set MTU to 512 for full JSON packets
   BLEDevice::setMTU(512);
 
   // Create BLE Server
@@ -159,24 +170,22 @@ void loop() {
       lastTelemetryMillis = currentMillis;
       sequence++;
 
-      // Read raw hardware sensors from ADC
-      int raw1 = analogRead(PIN_SENSOR_1);
-      int raw2 = analogRead(PIN_SENSOR_2);
+      // Read raw physical hardware sensors independently from ADC1
+      // No sensor derivation or cross-channel coupling
+      int mq2Raw = analogRead(PIN_MQ2);
+      int mq4Raw = analogRead(PIN_MQ4);
+      int mq7Raw = analogRead(PIN_MQ7);
 
-      // Convert to calibrated physical engineering units
-      // (Example: 12-bit ADC 0-4095 mapped to 0-500 ppm and 0-250 mV)
-      float s1Val = (raw1 / 4095.0) * 500.0;
-      float s2Val = (raw2 / 4095.0) * 250.0;
-
-      // Construct JSON payload
+      // Construct JSON payload with independent 3-channel telemetry
       // Delimited with newline '\n' for framing across BLE chunk boundaries
       char payload[256];
       snprintf(payload, sizeof(payload),
-        "{\"deviceId\":\"%s\",\"sequence\":%u,\"mode\":\"hardware\",\"sensors\":{\"sensor_1\":{\"value\":%.1f,\"unit\":\"ppm\"},\"sensor_2\":{\"value\":%.1f,\"unit\":\"mV\"}},\"status\":\"ok\"}\n",
+        "{\"deviceId\":\"%s\",\"sequence\":%u,\"mode\":\"hardware\",\"sensors\":{\"mq2_raw\":%d,\"mq4_raw\":%d,\"mq7_raw\":%d},\"status\":\"ok\"}\n",
         DEVICE_NAME,
         sequence,
-        s1Val,
-        s2Val
+        mq2Raw,
+        mq4Raw,
+        mq7Raw
       );
 
       // Transmit BLE notification
@@ -186,9 +195,10 @@ void loop() {
       Serial.print("[TELEMETRY #");
       Serial.print(sequence);
       Serial.print("] ");
-      Serial.println(payload);
+      Serial.print(payload);
     }
   }
 
   delay(20);
 }
+

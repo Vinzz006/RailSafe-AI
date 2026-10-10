@@ -55,6 +55,7 @@ class SensorReading {
   final Map<String, SensorChannelData> sensors;
   final String status;
   final Map<String, dynamic> rawJson;
+  final List<String> missingChannels;
 
   SensorReading({
     required this.deviceId,
@@ -64,6 +65,7 @@ class SensorReading {
     required this.sensors,
     required this.status,
     required this.rawJson,
+    this.missingChannels = const [],
   });
 
   factory SensorReading.fromJson(Map<String, dynamic> json) {
@@ -91,7 +93,7 @@ class SensorReading {
       });
     }
 
-    // Ensure fallback if sensors object was missing or empty
+    // Ensure fallback if sensors object was missing or empty in legacy/demo payloads
     if (sensorsMap.isEmpty) {
       if (json.containsKey('sensor_1')) {
         sensorsMap['sensor_1'] = SensorChannelData.fromJson(json['sensor_1'], defaultLabel: "Sensor 1");
@@ -99,6 +101,16 @@ class SensorReading {
       if (json.containsKey('sensor_2')) {
         sensorsMap['sensor_2'] = SensorChannelData.fromJson(json['sensor_2'], defaultLabel: "Sensor 2");
       }
+    }
+
+    final missing = <String>[];
+    if (m == 'hardware') {
+      final hasMq2 = sensorsMap.containsKey('mq2_raw') || sensorsMap.containsKey('mq2');
+      final hasMq4 = sensorsMap.containsKey('mq4_raw') || sensorsMap.containsKey('mq4');
+      final hasMq7 = sensorsMap.containsKey('mq7_raw') || sensorsMap.containsKey('mq7');
+      if (!hasMq2) missing.add('mq2_raw');
+      if (!hasMq4) missing.add('mq4_raw');
+      if (!hasMq7) missing.add('mq7_raw');
     }
 
     return SensorReading(
@@ -109,6 +121,7 @@ class SensorReading {
       sensors: sensorsMap,
       status: st,
       rawJson: json,
+      missingChannels: missing,
     );
   }
 
@@ -119,29 +132,69 @@ class SensorReading {
         'mode': mode,
         'sensors': sensors.map((k, v) => MapEntry(k, v.toJson())),
         'status': status,
+        if (missingChannels.isNotEmpty) 'missingChannels': missingChannels,
       };
 
-  double? get sensor1Value => sensors['sensor_1']?.value;
-  double? get sensor2Value => sensors['sensor_2']?.value;
+  bool get isHardwareMode => mode == 'hardware';
+  bool get isDemoMode => mode == 'demo';
 
-  /// Returns MQ-2 combustible / smoke raw reading (fallback to sensor_1 if not named)
-  double get mq2Value =>
-      sensors['mq2_raw']?.value ??
-      sensors['mq2']?.value ??
-      sensors['sensor_1']?.value ??
-      0.0;
+  /// Telemetry status reflecting any missing channels in physical hardware mode
+  String get telemetryStatus => (isHardwareMode && hasMissingTelemetry) ? 'missing_telemetry' : status;
 
-  /// Returns MQ-4 methane / CNG raw reading (fallback to sensor_2 if not named)
-  double get mq4Value =>
-      sensors['mq4_raw']?.value ??
-      sensors['mq4']?.value ??
-      sensors['sensor_2']?.value ??
-      0.0;
+  /// Whether telemetry packet contains all required channels without missing fields
+  bool get isTelemetryComplete => missingChannels.isEmpty;
 
-  /// Returns MQ-7 carbon monoxide raw reading (fallback to sensor_3 or calibrated proportion)
-  double get mq7Value =>
-      sensors['mq7_raw']?.value ??
-      sensors['mq7']?.value ??
-      sensors['sensor_3']?.value ??
-      ((sensors['sensor_1']?.value ?? 0.0) * 0.45);
+  /// Whether any required physical telemetry channel is missing
+  bool get hasMissingTelemetry => missingChannels.isNotEmpty;
+
+  /// True if all 3 physical ADC channels (MQ-2, MQ-4, MQ-7) are present
+  bool get hasAllPhysicalChannels =>
+      (sensors.containsKey('mq2_raw') || sensors.containsKey('mq2')) &&
+      (sensors.containsKey('mq4_raw') || sensors.containsKey('mq4')) &&
+      (sensors.containsKey('mq7_raw') || sensors.containsKey('mq7'));
+
+  // Backward-compatible channel accessors for legacy UI widgets
+  double? get sensor1Value =>
+      sensors['sensor_1']?.value ?? sensors['mq2_raw']?.value ?? sensors['mq2']?.value;
+  double? get sensor2Value =>
+      sensors['sensor_2']?.value ?? sensors['mq4_raw']?.value ?? sensors['mq4']?.value;
+  double? get sensor3Value =>
+      sensors['sensor_3']?.value ?? sensors['mq7_raw']?.value ?? sensors['mq7']?.value;
+
+  /// Returns MQ-2 combustible / smoke raw reading.
+  /// In hardware mode, returns actual measured value or null if missing (no fabrication).
+  /// In demo mode, falls back to synthetic sensor_1 channel if present.
+  double? get mq2Value {
+    final direct = sensors['mq2_raw']?.value ?? sensors['mq2']?.value;
+    if (direct != null) return direct;
+    if (isDemoMode) {
+      return sensors['sensor_1']?.value ?? 0.0;
+    }
+    return null;
+  }
+
+  /// Returns MQ-4 methane / CNG raw reading.
+  /// In hardware mode, returns actual measured value or null if missing (no fabrication).
+  /// In demo mode, falls back to synthetic sensor_2 channel if present.
+  double? get mq4Value {
+    final direct = sensors['mq4_raw']?.value ?? sensors['mq4']?.value;
+    if (direct != null) return direct;
+    if (isDemoMode) {
+      return sensors['sensor_2']?.value ?? 0.0;
+    }
+    return null;
+  }
+
+  /// Returns MQ-7 carbon monoxide raw reading.
+  /// In hardware mode, returns actual measured value or null if missing (no interpolation).
+  /// In demo mode, falls back to synthetic sensor_3 channel or demo proportional model.
+  double? get mq7Value {
+    final direct = sensors['mq7_raw']?.value ?? sensors['mq7']?.value;
+    if (direct != null) return direct;
+    if (isDemoMode) {
+      return sensors['sensor_3']?.value ?? ((sensors['sensor_1']?.value ?? 0.0) * 0.45);
+    }
+    return null;
+  }
 }
+

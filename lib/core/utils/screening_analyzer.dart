@@ -137,7 +137,8 @@ class ScreeningAnalyzer {
         val3 = (sensors['mq7'] is Map)
             ? (sensors['mq7']['value'] as num?)?.toDouble()
             : (sensors['mq7'] as num?)?.toDouble();
-      } else if (val1 != null) {
+      } else if (isDemo && val1 != null) {
+        // Fallback permitted only in legacy demo mode
         val3 = val1 * 0.45;
       }
       if (val3 != null) {
@@ -150,9 +151,11 @@ class ScreeningAnalyzer {
     final s2Max = s2Values.isNotEmpty ? s2Values.reduce((a, b) => a > b ? a : b) : 0.0;
     final s2Avg = s2Values.isNotEmpty ? s2Values.reduce((a, b) => a + b) / s2Values.length : 0.0;
 
-    final mq2Peak = mq2Values.isNotEmpty ? mq2Values.reduce((a, b) => a > b ? a : b) : s1Max;
-    final mq4Peak = mq4Values.isNotEmpty ? mq4Values.reduce((a, b) => a > b ? a : b) : s2Max;
-    final mq7Peak = mq7Values.isNotEmpty ? mq7Values.reduce((a, b) => a > b ? a : b) : (s1Max * 0.45);
+    final mq2Peak = mq2Values.isNotEmpty ? mq2Values.reduce((a, b) => a > b ? a : b) : (isDemo ? s1Max : 0.0);
+    final mq4Peak = mq4Values.isNotEmpty ? mq4Values.reduce((a, b) => a > b ? a : b) : (isDemo ? s2Max : 0.0);
+    final mq7Peak = mq7Values.isNotEmpty
+        ? mq7Values.reduce((a, b) => a > b ? a : b)
+        : (isDemo ? (s1Max * 0.45) : 0.0);
 
     final bool anomalyDetected;
     final String modelName;

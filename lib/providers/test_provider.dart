@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../core/constants/ble_constants.dart';
+import '../core/errors/app_error.dart';
 import '../core/utils/screening_analyzer.dart';
 import '../models/app_alert.dart';
 import '../models/prediction_response.dart';
@@ -212,9 +213,19 @@ class TestProvider extends ChangeNotifier {
           double mq7Peak = 0.0;
 
           for (final r in _currentSessionReadings) {
-            if (r.mq2Value > mq2Peak) mq2Peak = r.mq2Value;
-            if (r.mq4Value > mq4Peak) mq4Peak = r.mq4Value;
-            if (r.mq7Value > mq7Peak) mq7Peak = r.mq7Value;
+            final v2 = r.mq2Value;
+            final v4 = r.mq4Value;
+            final v7 = r.mq7Value;
+            if (v2 != null && v2 > mq2Peak) mq2Peak = v2;
+            if (v4 != null && v4 > mq4Peak) mq4Peak = v4;
+            if (v7 != null && v7 > mq7Peak) mq7Peak = v7;
+          }
+
+          if (_testMode == 'hardware' && _currentSessionReadings.any((r) => r.hasMissingTelemetry)) {
+            throw BackendPredictionException(
+              "Hardware telemetry incomplete: Missing physical sensor channels in screening session.",
+              statusCode: 400,
+            );
           }
 
           final token = await _authService.getIdToken() ?? "DEMO_OFFICER_TOKEN";

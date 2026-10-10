@@ -279,6 +279,10 @@ class BleService {
     }
   }
 
+  /// Visible for testing byte framing, buffering, and packet processing
+  @visibleForTesting
+  void handleIncomingBytesForTesting(List<int> bytes) => _handleIncomingBytes(bytes);
+
   /// Processes raw incoming bytes with framing/chunking support & JSON parsing
   void _handleIncomingBytes(List<int> bytes) {
     if (bytes.isEmpty) return;
