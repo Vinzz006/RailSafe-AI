@@ -4,11 +4,12 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/app_alert.dart';
+import 'auth_service.dart';
 import 'local_storage_service.dart';
 
 /// Represents an unattended luggage alert returned by the RailGuard Vision API.
 class RailGuardAlertModel {
-  final int id;
+  final dynamic id;
   final String? eventUid;
   final DateTime timestamp;
   final String cameraId;
@@ -19,6 +20,7 @@ class RailGuardAlertModel {
   final String snapshotUrl;
   final String? clipUrl;
   final String reviewStatus; // 'unreviewed', 'verified', 'false_alarm'
+  final String? reviewedBy;
   final DateTime? clearedTimestamp;
   final String disclaimer;
 
@@ -34,13 +36,14 @@ class RailGuardAlertModel {
     required this.snapshotUrl,
     this.clipUrl,
     required this.reviewStatus,
+    this.reviewedBy,
     this.clearedTimestamp,
     this.disclaimer = "FOR HUMAN REVIEW ONLY — Does not detect explosives or narcotics.",
   });
 
   factory RailGuardAlertModel.fromJson(Map<String, dynamic> json) {
     return RailGuardAlertModel(
-      id: json['id'] is int ? json['id'] : int.tryParse(json['id'].toString()) ?? 0,
+      id: json['id'] ?? json['event_uid'] ?? 0,
       eventUid: json['event_uid']?.toString(),
       timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ?? DateTime.now(),
       cameraId: json['camera_id']?.toString() ?? 'CAM-01',
@@ -51,6 +54,7 @@ class RailGuardAlertModel {
       snapshotUrl: json['snapshot_url']?.toString() ?? '',
       clipUrl: json['clip_url']?.toString(),
       reviewStatus: json['review_status']?.toString() ?? 'unreviewed',
+      reviewedBy: json['reviewed_by']?.toString(),
       clearedTimestamp: json['cleared_timestamp'] != null
           ? DateTime.tryParse(json['cleared_timestamp'].toString())
           : null,
@@ -82,10 +86,12 @@ class RailGuardAlertModel {
 /// Service client for connecting Flutter to Render-hosted RailGuard Vision API.
 class RailGuardApiService {
   final LocalStorageService _storage;
+  final AuthService? _authService;
   final http.Client _client;
 
-  RailGuardApiService(this._storage, {http.Client? client})
-      : _client = client ?? http.Client();
+  RailGuardApiService(this._storage, {AuthService? authService, http.Client? client})
+      : _authService = authService,
+        _client = client ?? http.Client();
 
   /// Default production Render URL or local fallback
   static const String defaultBaseUrl = "https://railguard-vision.onrender.com";
@@ -98,13 +104,19 @@ class RailGuardApiService {
     return defaultBaseUrl;
   }
 
-  /// Default development token (operator role)
-  String get apiToken => "dev-railguard-token-change-in-production";
+  /// Builds authenticated headers attaching the real Firebase ID Token
+  Future<Map<String, String>> _buildHeaders([String? token]) async {
+    String? effectiveToken = token;
+    if (effectiveToken == null && _authService != null) {
+      effectiveToken = await _authService.getIdToken();
+    }
+    effectiveToken ??= "dev-test-token";
 
-  Map<String, String> _buildHeaders([String? token]) => {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer ${token ?? apiToken}",
-      };
+    return {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer $effectiveToken",
+    };
+  }
 
   /// Check backend liveness and storage status: GET /health
   Future<Map<String, dynamic>> checkHealth({String? overrideUrl}) async {
@@ -119,7 +131,7 @@ class RailGuardApiService {
           "success": true,
           "status": decoded["status"],
           "version": decoded["version"],
-          "storage_ready": decoded["storage_ready"] == true,
+          "persistence": decoded["persistence"] ?? "Cloud Firestore",
           "disclaimer": decoded["disclaimer"],
         };
       }
@@ -150,9 +162,10 @@ class RailGuardApiService {
       if (status != null) "status": status,
     };
     final uri = Uri.parse("$target/api/alerts").replace(queryParameters: queryParams);
+    final headers = await _buildHeaders();
 
     final res = await _client
-        .get(uri, headers: _buildHeaders())
+        .get(uri, headers: headers)
         .timeout(const Duration(seconds: 5));
 
     if (res.statusCode == 200) {
@@ -161,7 +174,7 @@ class RailGuardApiService {
           .map((item) => RailGuardAlertModel.fromJson(item as Map<String, dynamic>))
           .toList();
     } else if (res.statusCode == 401) {
-      throw Exception("Unauthorized: Invalid API token.");
+      throw Exception("Unauthorized: Invalid or expired Firebase ID token.");
     } else {
       throw Exception("Failed to load alerts: HTTP ${res.statusCode} - ${res.body}");
     }
@@ -169,7 +182,7 @@ class RailGuardApiService {
 
   /// Submit operator review: PATCH /api/alerts/{id}/review
   Future<RailGuardAlertModel> reviewAlert(
-    int alertId,
+    dynamic alertId,
     String reviewStatus, {
     String? overrideUrl,
   }) async {
@@ -177,8 +190,9 @@ class RailGuardApiService {
     final uri = Uri.parse("$target/api/alerts/$alertId/review");
 
     final payload = jsonEncode({"review_status": reviewStatus});
+    final headers = await _buildHeaders();
     final res = await _client
-        .patch(uri, headers: _buildHeaders(), body: payload)
+        .patch(uri, headers: headers, body: payload)
         .timeout(const Duration(seconds: 5));
 
     if (res.statusCode == 200) {
@@ -190,23 +204,26 @@ class RailGuardApiService {
   }
 
   /// Formats direct URL to fetch snapshot JPEG image with authorization query parameter
-  String getSnapshotUrl(int alertId, {String? overrideUrl}) {
+  Future<String> getSnapshotUrl(dynamic alertId, {String? overrideUrl}) async {
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
-    return "$target/api/alerts/$alertId/snapshot?token=$apiToken";
+    final token = await _authService?.getIdToken() ?? "dev-test-token";
+    return "$target/api/alerts/$alertId/snapshot?token=$token";
   }
 
   /// Formats direct URL to stream context MP4 video clip with authorization query parameter
-  String getClipUrl(int alertId, {String? overrideUrl}) {
+  Future<String> getClipUrl(dynamic alertId, {String? overrideUrl}) async {
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
-    return "$target/api/alerts/$alertId/clip?token=$apiToken";
+    final token = await _authService?.getIdToken() ?? "dev-test-token";
+    return "$target/api/alerts/$alertId/clip?token=$token";
   }
 
   /// Retrieve running false alarm rate: GET /api/alerts/stats/false-alarm-rate
   Future<Map<String, dynamic>> getFalseAlarmRate({String? overrideUrl}) async {
     final target = (overrideUrl ?? baseUrl).trim().replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.parse("$target/api/alerts/stats/false-alarm-rate");
+    final headers = await _buildHeaders();
 
-    final res = await _client.get(uri, headers: _buildHeaders()).timeout(const Duration(seconds: 5));
+    final res = await _client.get(uri, headers: headers).timeout(const Duration(seconds: 5));
     if (res.statusCode == 200) {
       return jsonDecode(res.body) as Map<String, dynamic>;
     }

@@ -1,11 +1,10 @@
-"""FastAPI Cloud Backend for RailGuard Vision.
+"""FastAPI Cloud Backend for RailGuard Vision on Render.
 
-Provides secure endpoints for:
-- Health check and system liveness
-- Authenticated camera agent ingestion (POST /api/ingest/alerts)
-- Mobile operator alert retrieval and review (Flutter client)
-- Path-traversal safe evidence delivery (snapshots & clips)
-- Real-time WebSocket event broadcasting
+Utilizes:
+- Cloud Firestore for distributed alert persistence (No persistent disk required)
+- Firebase Authentication for verified operator role verification (Firebase ID Token)
+- Dedicated secret token (RAILGUARD_AGENT_TOKEN) for laptop edge camera ingestion
+- Path-traversal safe evidence delivery and WebSocket live push notifications
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ import contextlib
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
@@ -36,7 +36,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from src.config import SystemConfig, load_config
-from src.db import AlertDatabaseManager, AlertRecord
+from src.firebase_service import get_firebase_app, get_firestore_db, verify_firebase_id_token
+from src.firestore_repository import FirestoreAlertRepository
 
 # Configure sanitized logging
 logging.basicConfig(
@@ -45,16 +46,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("railguard_api")
 
-# Load configuration and initialize database
+# Load configuration
 config: SystemConfig = load_config()
-db: AlertDatabaseManager = AlertDatabaseManager(config.storage.db_path)
 
-# Ensure persistent evidence storage directories exist
-Path(config.storage.alerts_dir).mkdir(parents=True, exist_ok=True)
-Path(config.storage.clips_dir).mkdir(parents=True, exist_ok=True)
-Path(config.storage.db_path).parent.mkdir(parents=True, exist_ok=True)
+# Standard container evidence storage (in /tmp or safe container directory, NOT /var/data)
+CONTAINER_EVIDENCE_DIR = Path(tempfile.gettempdir()) / "railguard_evidence"
+CONTAINER_SNAPSHOTS_DIR = CONTAINER_EVIDENCE_DIR / "alerts"
+CONTAINER_CLIPS_DIR = CONTAINER_EVIDENCE_DIR / "clips"
+CONTAINER_SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+CONTAINER_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Security bearer scheme (auto_error=False to allow query token fallback)
+# Security bearer scheme
 security_scheme = HTTPBearer(auto_error=False)
 
 
@@ -89,14 +91,42 @@ ws_manager = WebSocketManager()
 
 
 # ============================================================================
+# Lazy Repository Access
+# ============================================================================
+_repository_instance: Optional[FirestoreAlertRepository] = None
+
+
+def get_repository() -> FirestoreAlertRepository:
+    """Lazily initialize and return the Firestore repository instance."""
+    global _repository_instance
+    if _repository_instance is None:
+        try:
+            get_firebase_app(config.firebase)
+            _repository_instance = FirestoreAlertRepository(
+                collection_name=config.firebase.alerts_collection
+            )
+        except Exception as e:
+            logger.error("Failed to connect to Cloud Firestore: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Cloud Firestore persistence layer is unavailable. Check server configuration.",
+            )
+    return _repository_instance
+
+
+# ============================================================================
 # Application Lifespan
 # ============================================================================
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    logger.info("RailGuard Vision Cloud API initialized.")
-    logger.info("Database: %s", config.storage.db_path)
-    logger.info("Alerts Dir: %s", config.storage.alerts_dir)
-    logger.info("Clips Dir: %s", config.storage.clips_dir)
+    logger.info("RailGuard Vision Cloud API initialized (Render Free / Firestore Mode).")
+    logger.info("Project ID: %s", config.firebase.project_id)
+    logger.info("Collection: %s", config.firebase.alerts_collection)
+    # Attempt non-blocking background initialization of Firebase
+    try:
+        get_firebase_app(config.firebase)
+    except Exception as e:
+        logger.warning("Firebase Admin initialization deferred: %s", e)
     yield
     logger.info("RailGuard Vision Cloud API shutting down.")
 
@@ -104,7 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="RailGuard Vision API",
     version=config.app.version,
-    description="Early-warning unattended luggage screening assistance API for Indian Railways.",
+    description="Early-warning unattended luggage screening assistance API with Firebase Firestore persistence.",
     lifespan=lifespan,
 )
 
@@ -121,34 +151,57 @@ app.add_middleware(
 # ============================================================================
 # Authentication Dependencies
 # ============================================================================
-def verify_api_token(
+def verify_firebase_operator(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(security_scheme),
     token_query: Optional[str] = Query(None, alias="token"),
-) -> str:
-    """Verify bearer token or query token for mobile operator endpoints."""
-    provided_token = None
+) -> Dict[str, Any]:
+    """Verify Firebase ID token for mobile operators and screening officers."""
+    raw_token = None
     if credentials:
-        provided_token = credentials.credentials
+        raw_token = credentials.credentials
     elif token_query:
-        provided_token = token_query
+        raw_token = token_query
 
-    expected_api = config.security.api_token
-    expected_agent = config.security.agent_token
-
-    if not provided_token or provided_token not in (expected_api, expected_agent):
+    if not raw_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized: Invalid or missing authentication token.",
+            detail="Missing authentication token. Please provide a Bearer Firebase ID token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return provided_token
+
+    # Allow development / demo token bypass if explicitly enabled
+    if config.firebase.allow_dev_auth_bypass and raw_token in (
+        "DEMO_OFFICER_TOKEN",
+        "dev-test-token",
+        "test-operator-token",
+        config.security.api_token,
+    ):
+        return {
+            "uid": "dev-operator-uid",
+            "email": "operator@railsafe.local",
+            "name": "Screening Operator",
+            "role": "operator",
+        }
+
+    try:
+        decoded_claims = verify_firebase_id_token(
+            token=raw_token,
+            allow_dev_bypass=config.firebase.allow_dev_auth_bypass,
+        )
+        return decoded_claims
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def verify_agent_token(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(security_scheme),
     token_query: Optional[str] = Query(None, alias="token"),
 ) -> str:
-    """Verify authentication for camera ingestion agent."""
+    """Verify dedicated secret token for station laptop camera ingestion agent."""
     provided_token = None
     if credentials:
         provided_token = credentials.credentials
@@ -156,9 +209,8 @@ def verify_agent_token(
         provided_token = token_query
 
     expected_agent = config.security.agent_token
-    expected_api = config.security.api_token
 
-    if not provided_token or provided_token not in (expected_agent, expected_api):
+    if not provided_token or provided_token != expected_agent:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized: Invalid camera ingestion agent token.",
@@ -182,8 +234,8 @@ class ClearAlertRequest(BaseModel):
 
 
 class AlertResponse(BaseModel):
-    id: int
-    event_uid: Optional[str] = None
+    id: Any
+    event_uid: str
     timestamp: str
     camera_id: str
     track_id: int
@@ -193,6 +245,8 @@ class AlertResponse(BaseModel):
     snapshot_url: str
     clip_url: Optional[str] = None
     review_status: str
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
     cleared_timestamp: Optional[str] = None
     created_at: Optional[str] = None
     disclaimer: str = (
@@ -200,58 +254,53 @@ class AlertResponse(BaseModel):
     )
 
 
-def serialize_alert(alert: AlertRecord) -> AlertResponse:
-    """Convert AlertRecord to API response model with authenticated resource URLs."""
-    snap_url = f"/api/alerts/{alert.id}/snapshot"
-    clip_url = f"/api/alerts/{alert.id}/clip" if alert.clip_path else None
+def serialize_firestore_alert(doc_data: Dict[str, Any]) -> AlertResponse:
+    """Serialize Firestore document data into standardized AlertResponse model."""
+    doc_id = doc_data.get("id") or doc_data.get("event_uid", "")
+    snap_url = doc_data.get("snapshot_url") or f"/api/alerts/{doc_id}/snapshot"
+    clip_url = doc_data.get("clip_url") or (f"/api/alerts/{doc_id}/clip" if doc_data.get("clip_key") else None)
+
     return AlertResponse(
-        id=alert.id,
-        event_uid=alert.event_uid,
-        timestamp=alert.timestamp,
-        camera_id=alert.camera_id,
-        track_id=alert.track_id,
-        object_class=alert.object_class,
-        event_duration=alert.event_duration,
-        reason=alert.reason,
+        id=doc_id,
+        event_uid=doc_data.get("event_uid", str(doc_id)),
+        timestamp=doc_data.get("timestamp", ""),
+        camera_id=doc_data.get("camera_id", "CAM-01"),
+        track_id=int(doc_data.get("track_id", 0)),
+        object_class=doc_data.get("object_class", "luggage"),
+        event_duration=float(doc_data.get("event_duration", 0.0)),
+        reason=doc_data.get("reason", "Unattended luggage detected"),
         snapshot_url=snap_url,
         clip_url=clip_url,
-        review_status=alert.review_status,
-        cleared_timestamp=alert.cleared_timestamp,
-        created_at=alert.created_at,
+        review_status=doc_data.get("review_status", "unreviewed"),
+        reviewed_by=doc_data.get("reviewed_by"),
+        reviewed_at=doc_data.get("reviewed_at"),
+        cleared_timestamp=doc_data.get("cleared_timestamp"),
+        created_at=doc_data.get("created_at"),
     )
 
 
 # ============================================================================
-# Path Traversal Guard
+# Safe Evidence Path Validation
 # ============================================================================
-def validate_safe_evidence_path(filepath_str: str, allowed_dirs: List[str]) -> Path:
-    """Ensure requested evidence path exists and resolves inside allowed directory."""
+def validate_safe_evidence_path(filepath_str: str) -> Path:
+    """Ensure evidence path exists and is confined to the safe container directory."""
     raw_path = Path(filepath_str)
     if not raw_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Requested evidence file not found on storage.",
+            detail="Evidence file not found on cloud storage.",
         )
 
-    resolved_file = raw_path.resolve()
-    is_safe = False
-    for ad in allowed_dirs:
-        resolved_allowed = Path(ad).resolve()
-        try:
-            resolved_file.relative_to(resolved_allowed)
-            is_safe = True
-            break
-        except ValueError:
-            continue
-
-    if not is_safe:
-        logger.warning("Path traversal attempt blocked: %s", filepath_str)
+    resolved = raw_path.resolve()
+    try:
+        resolved.relative_to(CONTAINER_EVIDENCE_DIR.resolve())
+    except ValueError:
+        logger.warning("Traversal attempt blocked on evidence: %s", filepath_str)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access forbidden: Evidence path is outside permitted storage boundaries.",
+            detail="Access forbidden: Path outside permitted storage boundaries.",
         )
-
-    return resolved_file
+    return resolved
 
 
 # ============================================================================
@@ -259,19 +308,37 @@ def validate_safe_evidence_path(filepath_str: str, allowed_dirs: List[str]) -> P
 # ============================================================================
 @app.get("/health", tags=["System"])
 def health_check() -> Dict[str, Any]:
-    """Public health and readiness check without exposing secrets or paths."""
-    storage_ok = Path(config.storage.alerts_dir).is_dir() and Path(config.storage.clips_dir).is_dir()
+    """Lightweight health check for Render process monitoring (Independent of Firestore)."""
     return {
-        "status": "healthy" if storage_ok else "degraded",
+        "status": "healthy",
         "service": "RailGuard Vision Cloud Backend",
         "version": config.app.version,
-        "storage_ready": storage_ok,
+        "persistence": "Cloud Firestore",
         "disclaimer": config.app.disclaimer,
     }
 
 
+@app.get("/ready", tags=["System"])
+def readiness_check(
+    _user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: FirestoreAlertRepository = Depends(get_repository),
+) -> Dict[str, Any]:
+    """Protected readiness check confirming Firestore database accessibility."""
+    if not repo.check_readiness():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Firestore database unavailable.",
+        )
+    return {
+        "status": "ready",
+        "firestore_connected": True,
+        "project_id": config.firebase.project_id,
+        "collection": config.firebase.alerts_collection,
+    }
+
+
 # ============================================================================
-# Ingestion Endpoints (Camera Agent -> Cloud)
+# Ingestion Endpoints (Station Laptop -> Cloud)
 # ============================================================================
 @app.post(
     "/api/ingest/alerts",
@@ -289,91 +356,92 @@ async def ingest_alert(
     snapshot: UploadFile = File(...),
     clip: Optional[UploadFile] = File(None),
     _token: str = Depends(verify_agent_token),
+    repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> Dict[str, Any]:
-    """Ingest an unattended luggage alert raised by the local camera agent.
+    """Ingest an alert and evidence from the station laptop into Firestore.
     
-    Includes snapshot and optional rolling buffer clip. Idempotent on event_uid.
+    Guaranteed idempotent using event_uid as document key.
     """
-    # 1. Validate fields
     if not event_uid or len(event_uid) < 4:
         raise HTTPException(status_code=400, detail="Invalid event_uid.")
     if track_id < 0 or event_duration < 0:
         raise HTTPException(status_code=400, detail="Invalid track_id or event_duration.")
 
-    # 2. Check for duplicate ingestion via event_uid (Idempotency)
-    existing = db.get_alert_by_uid(event_uid)
+    # 1. Check for duplicate upload (Idempotency)
+    existing = repo.get_alert(event_uid)
     if existing:
-        logger.info("Alert %s already exists in database (id=%d). Skipping re-insert.", event_uid, existing.id)
+        logger.info("Alert %s already exists in Firestore. Suppressing duplicate insert.", event_uid)
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
                 "status": "already_exists",
-                "alert_id": existing.id,
-                "event_uid": existing.event_uid,
+                "alert_id": event_uid,
+                "event_uid": event_uid,
                 "message": "Event previously ingested. Duplicate suppressed.",
             },
         )
 
-    # 3. Validate snapshot file
+    # 2. Validate snapshot image
     if not snapshot.content_type or not snapshot.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Snapshot must be a valid image file.")
 
-    # 4. Save snapshot with sanitized server-side filename
     safe_cam = re.sub(r"[^a-zA-Z0-9_\-]", "_", camera_id)
-    safe_uid = re.sub(r"[^a-zA-Z0-9_\-]", "_", event_uid)[:12]
-    snap_filename = f"snap_{safe_cam}_trk{track_id}_{safe_uid}.jpg"
-    snap_dest = Path(config.storage.alerts_dir).resolve() / snap_filename
+    safe_uid = re.sub(r"[^a-zA-Z0-9_\-]", "_", event_uid)
 
+    # Save snapshot in safe container storage
     snap_bytes = await snapshot.read()
-    if len(snap_bytes) > 10 * 1024 * 1024:  # 10 MB limit for snapshot
+    if len(snap_bytes) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Snapshot file exceeds 10MB limit.")
 
+    snap_filename = f"snap_{safe_cam}_{safe_uid}.jpg"
+    snap_dest = CONTAINER_SNAPSHOTS_DIR / snap_filename
     with open(snap_dest, "wb") as f:
         f.write(snap_bytes)
 
-    # 5. Save optional context clip
-    clip_path_str: Optional[str] = None
+    clip_filename: Optional[str] = None
     if clip is not None and clip.filename:
         clip_bytes = await clip.read()
-        if len(clip_bytes) > 30 * 1024 * 1024:  # 30 MB limit for clip
+        if len(clip_bytes) > 30 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Clip file exceeds 30MB limit.")
-
         ext = ".mp4" if "mp4" in (clip.content_type or "") or clip.filename.endswith(".mp4") else ".avi"
-        clip_filename = f"clip_{safe_cam}_trk{track_id}_{safe_uid}{ext}"
-        clip_dest = Path(config.storage.clips_dir).resolve() / clip_filename
+        clip_filename = f"clip_{safe_cam}_{safe_uid}{ext}"
+        clip_dest = CONTAINER_CLIPS_DIR / clip_filename
         with open(clip_dest, "wb") as f:
             f.write(clip_bytes)
-        clip_path_str = str(clip_dest)
 
-    # 6. Insert into persistent SQLite
-    alert_id = db.insert_alert(
-        timestamp=timestamp,
-        camera_id=camera_id,
-        track_id=track_id,
-        object_class=object_class,
-        event_duration=event_duration,
-        reason=reason,
-        snapshot_path=str(snap_dest),
-        clip_path=clip_path_str,
-        review_status="unreviewed",
-        cleared_timestamp=None,
-        event_uid=event_uid,
-    )
+    # 3. Create document in Cloud Firestore
+    doc_data = {
+        "event_uid": event_uid,
+        "timestamp": timestamp,
+        "camera_id": camera_id,
+        "track_id": track_id,
+        "object_class": object_class,
+        "event_duration": event_duration,
+        "reason": reason,
+        "snapshot_key": snap_filename,
+        "snapshot_url": f"/api/alerts/{event_uid}/snapshot",
+        "clip_key": clip_filename,
+        "clip_url": f"/api/alerts/{event_uid}/clip" if clip_filename else None,
+        "review_status": "unreviewed",
+        "cleared_timestamp": None,
+    }
 
-    created_alert = db.get_alert_by_id(alert_id)
+    doc_id, created = repo.create_or_update_alert(doc_data)
+
+    # Broadcast new alert to connected mobile clients
+    created_alert = repo.get_alert(doc_id)
     if created_alert:
-        # Broadcast real-time event to connected mobile devices
         await ws_manager.broadcast({
             "event": "new_alert",
-            "alert": serialize_alert(created_alert).model_dump(),
+            "alert": serialize_firestore_alert(created_alert).model_dump(),
         })
 
-    logger.info("Ingested new alert id=%d (uid=%s, cam=%s, trk=%d)", alert_id, event_uid, camera_id, track_id)
+    logger.info("Alert %s successfully ingested into Firestore.", doc_id)
     return {
         "status": "created",
-        "alert_id": alert_id,
+        "alert_id": doc_id,
         "event_uid": event_uid,
-        "message": "Alert successfully recorded and evidence saved.",
+        "message": "Alert successfully recorded in Cloud Firestore.",
     }
 
 
@@ -381,11 +449,12 @@ async def ingest_alert(
 async def ingest_alert_cleared(
     req: ClearAlertRequest,
     _token: str = Depends(verify_agent_token),
+    repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> Dict[str, Any]:
-    """Update database when an active unattended alert clears on the camera agent."""
-    rows = db.update_cleared_timestamp(
-        track_id=req.track_id,
+    """Update Firestore when luggage is retrieved or moved on the platform."""
+    rows = repo.update_cleared_timestamp(
         camera_id=req.camera_id,
+        track_id=req.track_id,
         cleared_timestamp=req.cleared_timestamp,
     )
     if rows > 0:
@@ -395,7 +464,6 @@ async def ingest_alert_cleared(
             "track_id": req.track_id,
             "cleared_timestamp": req.cleared_timestamp,
         })
-    logger.info("Cleared alert for cam=%s trk=%d (rows=%d)", req.camera_id, req.track_id, rows)
     return {"status": "success", "rows_updated": rows}
 
 
@@ -407,69 +475,71 @@ def get_alerts(
     limit: int = Query(50, ge=1, le=500),
     unreviewed_only: bool = Query(False),
     status_filter: Optional[str] = Query(None, alias="status"),
-    _token: str = Depends(verify_api_token),
+    _user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> List[AlertResponse]:
-    """List historical and active security alerts."""
-    records = db.get_alerts(limit=limit, unreviewed_only=unreviewed_only)
-    if status_filter:
-        records = [r for r in records if r.review_status == status_filter]
-    return [serialize_alert(r) for r in records]
+    """Retrieve security alerts from Cloud Firestore."""
+    docs = repo.list_alerts(limit=limit, review_status=status_filter, unreviewed_only=unreviewed_only)
+    return [serialize_firestore_alert(d) for d in docs]
 
 
 @app.get("/api/alerts/{alert_id}", tags=["Alerts"], response_model=AlertResponse)
 def get_alert_detail(
-    alert_id: int,
-    _token: str = Depends(verify_api_token),
+    alert_id: str,
+    _user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> AlertResponse:
-    """Retrieve details for a specific alert."""
-    record = db.get_alert_by_id(alert_id)
-    if not record:
+    """Retrieve single alert details from Cloud Firestore."""
+    doc = repo.get_alert(alert_id)
+    if not doc:
         raise HTTPException(status_code=404, detail="Alert not found.")
-    return serialize_alert(record)
+    return serialize_firestore_alert(doc)
 
 
 @app.patch("/api/alerts/{alert_id}/review", tags=["Alerts"], response_model=AlertResponse)
 @app.post("/api/alerts/{alert_id}/review", tags=["Alerts"], response_model=AlertResponse)
 async def update_alert_review(
-    alert_id: int,
+    alert_id: str,
     req: ReviewUpdateRequest,
-    _token: str = Depends(verify_api_token),
+    user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> AlertResponse:
-    """Update operator review status ('verified' or 'false_alarm')."""
+    """Record operator verification or false-alarm review with reviewer UID audit."""
     if req.review_status not in ("verified", "false_alarm"):
         raise HTTPException(
             status_code=400,
             detail="review_status must be either 'verified' or 'false_alarm'.",
         )
 
-    record = db.get_alert_by_id(alert_id)
-    if not record:
+    operator_uid = user.get("uid", "operator")
+    success = repo.update_review_status(
+        alert_id=alert_id,
+        review_status=req.review_status,
+        reviewed_by=operator_uid,
+    )
+    if not success:
         raise HTTPException(status_code=404, detail="Alert not found.")
 
-    success = db.update_review_status(alert_id, req.review_status)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to update review status.")
+    updated_doc = repo.get_alert(alert_id)
+    assert updated_doc is not None
 
-    updated = db.get_alert_by_id(alert_id)
-    assert updated is not None
-
-    # Broadcast review update to Flutter clients
     await ws_manager.broadcast({
         "event": "alert_reviewed",
         "alert_id": alert_id,
         "review_status": req.review_status,
+        "reviewed_by": operator_uid,
     })
 
-    logger.info("Alert %d reviewed as '%s'", alert_id, req.review_status)
-    return serialize_alert(updated)
+    return serialize_firestore_alert(updated_doc)
 
 
 @app.get("/api/alerts/stats/false-alarm-rate", tags=["Alerts"])
 def get_false_alarm_rate(
-    _token: str = Depends(verify_api_token),
+    _user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> Dict[str, Any]:
-    """Retrieve running false alarm rate statistics."""
-    rate, total, false_alarms = db.get_false_alarm_rate()
+    """Retrieve false alarm rate computed from Firestore operator reviews."""
+    rate, total, false_alarms = repo.get_false_alarm_rate()
     return {
         "false_alarm_rate": rate,
         "total_reviewed": total,
@@ -479,52 +549,56 @@ def get_false_alarm_rate(
 
 
 # ============================================================================
-# Evidence Streaming Endpoints (Safe File Delivery)
+# Evidence Streaming Endpoints
 # ============================================================================
 @app.get("/api/alerts/{alert_id}/snapshot", tags=["Evidence"])
 def get_alert_snapshot(
-    alert_id: int,
-    _token: str = Depends(verify_api_token),
+    alert_id: str,
+    _user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> FileResponse:
     """Retrieve verified JPEG snapshot evidence for an alert."""
-    record = db.get_alert_by_id(alert_id)
-    if not record or not record.snapshot_path:
-        raise HTTPException(status_code=404, detail="Snapshot not available for this alert.")
+    doc = repo.get_alert(alert_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Alert not found.")
 
-    allowed = [
-        config.storage.alerts_dir,
-        config.storage.data_dir or config.storage.alerts_dir,
-        "data/alerts",
-    ]
-    safe_path = validate_safe_evidence_path(record.snapshot_path, allowed)
+    snap_key = doc.get("snapshot_key")
+    if not snap_key:
+        raise HTTPException(status_code=404, detail="No snapshot registered for this alert.")
+
+    snap_file = CONTAINER_SNAPSHOTS_DIR / snap_key
+    safe_file = validate_safe_evidence_path(str(snap_file))
+
     return FileResponse(
-        path=safe_path,
+        path=safe_file,
         media_type="image/jpeg",
-        filename=safe_path.name,
+        filename=safe_file.name,
     )
 
 
 @app.get("/api/alerts/{alert_id}/clip", tags=["Evidence"])
 def get_alert_clip(
-    alert_id: int,
-    _token: str = Depends(verify_api_token),
+    alert_id: str,
+    _user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: FirestoreAlertRepository = Depends(get_repository),
 ) -> FileResponse:
-    """Retrieve approximately 10-second contextual video clip for an alert."""
-    record = db.get_alert_by_id(alert_id)
-    if not record or not record.clip_path:
-        raise HTTPException(status_code=404, detail="Video clip not available for this alert.")
+    """Retrieve contextual MP4 video clip for an alert."""
+    doc = repo.get_alert(alert_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Alert not found.")
 
-    allowed = [
-        config.storage.clips_dir,
-        config.storage.data_dir or config.storage.clips_dir,
-        "data/clips",
-    ]
-    safe_path = validate_safe_evidence_path(record.clip_path, allowed)
-    media_type = "video/mp4" if safe_path.suffix.lower() == ".mp4" else "video/x-msvideo"
+    clip_key = doc.get("clip_key")
+    if not clip_key:
+        raise HTTPException(status_code=404, detail="No video clip available for this alert.")
+
+    clip_file = CONTAINER_CLIPS_DIR / clip_key
+    safe_file = validate_safe_evidence_path(str(clip_file))
+    media_type = "video/mp4" if safe_file.suffix.lower() == ".mp4" else "video/x-msvideo"
+
     return FileResponse(
-        path=safe_path,
+        path=safe_file,
         media_type=media_type,
-        filename=safe_path.name,
+        filename=safe_file.name,
     )
 
 
@@ -537,16 +611,20 @@ async def websocket_alerts_endpoint(
     token: Optional[str] = Query(None),
 ) -> None:
     """WebSocket endpoint for real-time alert pushes to mobile apps."""
-    expected_api = config.security.api_token
-    expected_agent = config.security.agent_token
-
-    if not token or token not in (expected_api, expected_agent):
+    if not token:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    try:
+        verify_firebase_id_token(token, allow_dev_bypass=config.firebase.allow_dev_auth_bypass)
+    except Exception:
+        # Check if matches agent token or static dev token
+        if token != config.security.agent_token and token != config.security.api_token:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
     await ws_manager.connect(websocket)
     try:
-        # Keep connection alive and accept incoming pings
         while True:
             data = await websocket.receive_text()
             if data == "ping":
@@ -558,11 +636,11 @@ async def websocket_alerts_endpoint(
 
 
 # ============================================================================
-# CLI Entry Point for Render
+# Entry Point
 # ============================================================================
 if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("PORT", 8000))
-    logger.info("Starting RailGuard Vision API on 0.0.0.0:%d", port)
+    logger.info("Starting RailGuard Vision Cloud Backend on 0.0.0.0:%d", port)
     uvicorn.run("app.api:app", host="0.0.0.0", port=port, reload=False)

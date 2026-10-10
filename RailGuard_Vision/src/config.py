@@ -78,6 +78,16 @@ class SecurityConfig:
 
 
 @dataclass
+class FirebaseConfig:
+    project_id: str = "railsafe-ai-92d9f"
+    service_account_json: Optional[str] = None
+    service_account_path: Optional[str] = None
+    alerts_collection: str = "railguard_alerts"
+    storage_bucket: Optional[str] = "railsafe-ai-92d9f.firebasestorage.app"
+    allow_dev_auth_bypass: bool = False
+
+
+@dataclass
 class EvaluationConfig:
     ground_truth_path: str = "data/ground_truth/ground_truth_template.csv"
     time_tolerance_seconds: float = 4.0
@@ -91,6 +101,7 @@ class SystemConfig:
     rules: RulesConfig = field(default_factory=RulesConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    firebase: FirebaseConfig = field(default_factory=FirebaseConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
     def validate(self) -> None:
@@ -205,6 +216,32 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
     if env_agent_token:
         security_data["agent_token"] = env_agent_token
 
+    # Firebase environment variable overrides
+    firebase_data = raw.get("firebase", {})
+    env_fb_project = os.getenv("FIREBASE_PROJECT_ID")
+    if env_fb_project:
+        firebase_data["project_id"] = env_fb_project
+
+    env_fb_sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if env_fb_sa_json:
+        firebase_data["service_account_json"] = env_fb_sa_json
+
+    env_fb_sa_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+    if env_fb_sa_path:
+        firebase_data["service_account_path"] = env_fb_sa_path
+
+    env_fb_collection = os.getenv("FIRESTORE_ALERTS_COLLECTION")
+    if env_fb_collection:
+        firebase_data["alerts_collection"] = env_fb_collection
+
+    env_fb_bucket = os.getenv("FIREBASE_STORAGE_BUCKET")
+    if env_fb_bucket:
+        firebase_data["storage_bucket"] = env_fb_bucket
+
+    env_fb_bypass = os.getenv("ALLOW_DEV_AUTH_BYPASS")
+    if env_fb_bypass is not None:
+        firebase_data["allow_dev_auth_bypass"] = env_fb_bypass.lower() in ("true", "1", "yes")
+
     # Video source type conversion
     src_val = video_data.get("source", 0)
     if isinstance(src_val, str) and src_val.isdigit():
@@ -217,6 +254,7 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> SystemConfig:
         rules=RulesConfig(**rules_data),
         storage=StorageConfig(**storage_data),
         security=SecurityConfig(**security_data),
+        firebase=FirebaseConfig(**firebase_data),
         evaluation=EvaluationConfig(**eval_data),
     )
     cfg.validate()

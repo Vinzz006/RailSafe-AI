@@ -26,6 +26,14 @@ service cloud.firestore {
       }
     }
 
+    // RailGuard Vision Alerts Collection
+    // Authenticated railway security officers can read alerts; client-side direct writes are blocked.
+    // All creation, updates, and reviews are mediated through FastAPI backend using Admin SDK.
+    match /railguard_alerts/{alertId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+
     // Deny all other access by default
     match /{document=**} {
       allow read, write: if false;

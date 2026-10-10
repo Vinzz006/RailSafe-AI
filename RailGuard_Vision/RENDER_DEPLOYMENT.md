@@ -1,13 +1,29 @@
-# RailGuard Vision — Render Cloud Deployment & Operator Runbook
+# RailGuard Vision — Render Free Cloud Deployment with Firebase Firestore
 
 > [!IMPORTANT]
-> **FOR HUMAN REVIEW ONLY** — RailGuard Vision is an optical surveillance early-warning prototype engineered for Indian Railways premises. Visible-light optical cameras **CANNOT detect explosives, narcotics, or chemical hazards**. Alerts prioritize locations for human security personnel (RPF) to deploy certified physical inspection tools (X-ray, Explosive Trace Detection / ETD, or canine squads). The system does not implement facial recognition, biometric profiling, or automated enforcement.
+> **FOR HUMAN REVIEW ONLY** — RailGuard Vision is an optical surveillance early-warning prototype engineered for Indian Railways station premises. Visible-light optical cameras **CANNOT detect explosives, narcotics, or chemical hazards**. Alerts prioritize locations for human security personnel (RPF/GRP) to deploy certified physical inspection tools (X-ray, Explosive Trace Detection / ETD, and canine squads). The system does not implement facial recognition, biometric profiling, or automated enforcement.
 
 ---
 
-## 1. System Topology & Architecture
+## 1. Resolution of the `/var/data` PermissionError
 
-RailGuard Vision separates optical computer vision processing at the station edge from centralized cloud storage and mobile push notification delivery:
+### Root Cause Analysis
+During previous deployment attempts on Render, the backend process failed on startup with:
+```text
+PermissionError: [Errno 13] Permission denied: '/var/data'
+```
+**Why this occurred:**
+`app/api.py` was previously instantiating a local SQLite database at `/var/data/security_alerts.db` at the module top level. On the **Render Free Tier**, no persistent disk exists at `/var/data` (disks require a paid Starter plan), and container processes run as a standard non-root user without permissions to create directories at the filesystem root `/`. This caused `uvicorn` to crash during module import before binding to `$PORT` or serving `/health`.
+
+**How it is now resolved:**
+1. **Decoupled Cloud from SQLite:** The cloud API on Render no longer touches `/var/data` or uses local SQLite.
+2. **Cloud Firestore Persistence:** Cloud alert records, timestamps, and operator review states are persisted directly in **Cloud Firestore** (`railguard_alerts` collection).
+3. **100% Render Free Tier Compatible:** No attached persistent disk is required on Render.
+4. **Local Edge Preserved:** The station laptop continues using its local SQLite database (`data/security_alerts.db`) for real-time video buffering and offline resilience.
+
+---
+
+## 2. Distributed Architecture
 
 ```
 ┌──────────────────────────────────────┐
@@ -15,98 +31,96 @@ RailGuard Vision separates optical computer vision processing at the station edg
 │ • Laptop USB Webcam / RTSP CCTV      │
 │ • YOLOv8n + ByteTrack Multi-Tracking │
 │ • Spatial-Temporal Rules Engine      │
-│ • Local Rolling Buffer (10s Context) │
-│ • Non-Blocking Asynchronous Forwarder│
+│ • Local SQLite (security_alerts.db)  │
+│ • Local Evidence (data/alerts/)      │
+│ • Asynchronous Agent (src/agent.py)  │
 └──────────────────┬───────────────────┘
                    │ Outbound Authenticated HTTPS (POST /api/ingest/alerts)
+                   │ Header: Authorization: Bearer <RAILGUARD_AGENT_TOKEN>
                    ▼
 ┌──────────────────────────────────────┐
-│       RENDER CLOUD BACKEND           │
+│     RENDER CLOUD BACKEND (FREE)      │
 │ • FastAPI Web Service (app/api.py)   │
 │ • Dynamic Port ($PORT)               │
-│ • Bearer Token Auth Guard            │
-│ • Path-Traversal Hardened Endpoints  │
+│ • Free Tier Plan (No Disks Needed)   │
+│ • Ingestion Auth: Agent Secret Token │
+│ • Operator Auth: Firebase ID Token   │
 │ • WebSockets (WSS /api/ws/alerts)    │
-│ • Persistent Disk Mount (/var/data)  │
-│   ├─ security_alerts.db (SQLite)     │
-│   ├─ alerts/ (JPEG Snapshots)        │
-│   └─ clips/ (MP4 Video Context)      │
-└──────────────────┬───────────────────┘
-                   │ Authenticated HTTPS / WSS
-                   ▼
-┌──────────────────────────────────────┐
+└──────────┬─────────────────┬─────────┘
+           │                 │
+           ▼                 ▼
+┌──────────────────┐ ┌──────────────────┐
+│ CLOUD FIRESTORE  │ │  FIREBASE AUTH   │
+│ Collection:      │ │ Cryptographic    │
+│ railguard_alerts │ │ Token Validation │
+└──────────────────┘ └──────────────────┘
+           ▲
+           │ Authenticated HTTPS (Bearer <Firebase_ID_Token>)
+┌──────────┴───────────────────────────┐
 │         FLUTTER MOBILE APP           │
+│ • Signs in via Firebase Auth         │
+│ • RailGuardApiService calls Render   │
 │ • RPF Field Officer Alerts Screen    │
-│ • Live Push Notifications            │
-│ • Verified / False Alarm Audit Trail │
-│ • Running False Alarm Rate Counter   │
+│ • Submits Verified / False Alarm     │
 └──────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Prerequisites
-
-1. **Render Account:** Sign up at [render.com](https://render.com).
-2. **Instance Plan:** A Render **Starter** plan ($7/mo) or higher is required for persistent disk support (`/var/data`). Render Free instances do not support attached disks.
-3. **Local Station Machine:** Laptop with Python 3.10+, USB webcam or RTSP feed, and internet connectivity.
-4. **Git Repository:** Pushed to GitHub/GitLab containing the `RailGuard_Vision` folder or root repository.
-
----
-
 ## 3. Render Dashboard Setup (Step-by-Step)
 
-Follow these manual steps in the Render Dashboard to deploy the backend:
+Follow these steps in the Render Dashboard to deploy on the **Free Tier**:
 
-### Step 3.1: Create a New Web Service
-1. Log in to your Render Dashboard and click **New +** > **Web Service**.
-2. Connect your Git repository (`RailSafe-AI`).
-3. Set the following basic parameters:
+### Step 3.1: Create Web Service
+1. Log in to [render.com](https://render.com) and click **New +** > **Web Service**.
+2. Select your connected repository: `RailSafe-AI`.
+3. Configure the service settings:
    - **Name:** `railguard-vision-api`
-   - **Region:** `Oregon (US West)` or `Singapore (Southeast Asia)`
+   - **Region:** `Oregon (US West)` or `Singapore`
    - **Branch:** `main`
-   - **Root Directory:** `RailGuard_Vision` (Important! Points to the subproject folder)
+   - **Root Directory:** `RailGuard_Vision` *(Important: points to the subproject folder)*
    - **Runtime:** `Python 3`
    - **Build Command:** `pip install --upgrade pip && pip install -r requirements.txt`
    - **Start Command:** `uvicorn app.api:app --host 0.0.0.0 --port $PORT`
-   - **Instance Type:** `Starter` ($7/month) — *Required for persistent disk*
+   - **Plan:** `Free` *(No paid persistent disk needed)*
 
-### Step 3.2: Attach Persistent Disk Storage
-1. Scroll down to the **Disks** section in the service creation settings (or go to **Disks** tab).
-2. Click **Add Disk**:
-   - **Disk Name:** `railguard-data`
-   - **Mount Path:** `/var/data`
-   - **Size:** `1 GB` (or larger depending on evidence retention policies)
+### Step 3.2: Set Health Check Path
+- Under **Advanced Settings**, set **Health Check Path** to `/health`.
+*(Note: `/health` runs without external dependencies so Render's health prober succeeds immediately).*
 
-### Step 3.3: Configure Health Check Path
-1. Under **Advanced Settings**, locate **Health Check Path**.
-2. Enter: `/health`
+### Step 3.3: Configure Environment Variables
+Under the **Environment** tab in Render, enter the following key-value pairs:
 
-### Step 3.4: Configure Environment Variables
-In the **Environment Variables** tab, add the following variables:
-
-| Variable Name | Example / Recommended Value | Description |
+| KEY | VALUE | Description |
 | :--- | :--- | :--- |
-| `PYTHON_VERSION` | `3.10.13` | Recommended stable Python runtime on Render |
-| `RAILGUARD_DATA_DIR` | `/var/data` | Persistent disk root mount path |
-| `RAILGUARD_DB_PATH` | `/var/data/security_alerts.db` | Persistent SQLite database file |
-| `RAILGUARD_ALERTS_DIR`| `/var/data/alerts` | Snapshot evidence storage path |
-| `RAILGUARD_CLIPS_DIR` | `/var/data/clips` | Context video clip storage path |
-| `RAILGUARD_API_TOKEN` | *(Generate a random 32-char string)* | Secret token for Flutter app & operators |
-| `RAILGUARD_AGENT_TOKEN`| *(Generate a random 32-char string)* | Secret token for station laptop agent |
+| `PYTHON_VERSION` | `3.10.13` | Recommended stable Python version |
+| `FIREBASE_PROJECT_ID` | `railsafe-ai-92d9f` | Your Firebase Project ID |
+| `FIRESTORE_ALERTS_COLLECTION` | `railguard_alerts` | Firestore collection for luggage alerts |
+| `FIREBASE_STORAGE_BUCKET` | `railsafe-ai-92d9f.firebasestorage.app` | Default Firebase Storage bucket |
+| `ALLOW_DEV_AUTH_BYPASS` | `false` | Disables testing bypass in production |
+| `RAILGUARD_AGENT_TOKEN` | *(Click **Generate** or enter random string)* | Secret token for station laptop agent |
+| `FIREBASE_SERVICE_ACCOUNT_JSON`| *(Paste JSON contents - see Step 3.4)* | Service account credentials secret |
 
-> [!CAUTION]
-> Never share or commit `RAILGUARD_API_TOKEN` or `RAILGUARD_AGENT_TOKEN` to source control. Use Render's Secret File or Environment Variable encryption.
+> [!IMPORTANT]
+> Do NOT set `RAILGUARD_DATA_DIR=/var/data` on the Render Free Tier.
 
-Click **Create Web Service**. Render will build and deploy the container.
+### Step 3.4: How to Obtain `FIREBASE_SERVICE_ACCOUNT_JSON`
+1. Go to the [Firebase Console](https://console.firebase.google.com/).
+2. Select your project: **railsafe-ai-92d9f**.
+3. Click the **Gear icon (Project settings)** > **Service accounts** tab.
+4. Click **Generate new private key** and confirm by clicking **Generate key**.
+5. Open the downloaded `.json` file in a text editor (e.g., Notepad).
+6. Copy the **entire JSON text** and paste it as the value of `FIREBASE_SERVICE_ACCOUNT_JSON` in Render.
+
+Click **Create Web Service**.
 
 ---
 
 ## 4. Verification & Health Checks
 
-Once the deployment finishes and shows **Live**, verify backend operation using Windows PowerShell or curl:
+Once Render displays **Live**, verify backend operation using Windows PowerShell or curl:
 
-### Health Check (Unauthenticated)
+### Health Check (Public, Process Liveness)
 ```powershell
 curl -i https://railguard-vision-api.onrender.com/health
 ```
@@ -119,28 +133,22 @@ Content-Type: application/json
   "status": "healthy",
   "service": "RailGuard Vision Cloud Backend",
   "version": "1.0.0",
-  "storage_ready": true,
+  "persistence": "Cloud Firestore",
   "disclaimer": "FOR HUMAN REVIEW ONLY — Does not detect explosives, chemical substances, or narcotics."
 }
 ```
 
-### Authenticated Alerts Query
-```powershell
-curl -i -H "Authorization: Bearer <YOUR_RAILGUARD_API_TOKEN>" https://railguard-vision-api.onrender.com/api/alerts
-```
-**Expected Response:** `HTTP/1.1 200 OK` with JSON array `[]`.
-
 ---
 
-## 5. Starting the Local Station Detection Agent
+## 5. Starting the Station Laptop Detection Agent
 
-On the laptop running the USB webcam at the railway station:
+On the laptop connected to the webcam on the railway platform:
 
-### Windows PowerShell Launch Command:
+### Windows PowerShell:
 ```powershell
 cd "c:\Users\shanm\Downloads\RailSafe AI\RailGuard_Vision"
 
-# Set target cloud backend and agent token
+# Set cloud URL and your agent token from Render
 $env:RAILGUARD_CLOUD_URL = "https://railguard-vision-api.onrender.com"
 $env:RAILGUARD_AGENT_TOKEN = "<YOUR_RAILGUARD_AGENT_TOKEN>"
 
@@ -148,7 +156,7 @@ $env:RAILGUARD_AGENT_TOKEN = "<YOUR_RAILGUARD_AGENT_TOKEN>"
 python run_agent.py --display
 ```
 
-### Alternatively via batch script:
+### Alternatively via Batch File:
 ```cmd
 cd "c:\Users\shanm\Downloads\RailSafe AI\RailGuard_Vision"
 set RAILGUARD_CLOUD_URL=https://railguard-vision-api.onrender.com
@@ -156,81 +164,89 @@ set RAILGUARD_AGENT_TOKEN=<YOUR_RAILGUARD_AGENT_TOKEN>
 run_agent.bat
 ```
 
-### What Happens:
-1. Opens laptop webcam (`0`).
-2. Runs YOLOv8n object detection and ByteTrack tracking locally at maximum hardware speed.
-3. Evaluates luggage stationarity and nearest-person owner heuristics.
-4. When a bag is stationary for > 15s without an owner, local pipeline raises an `ALERT`.
-5. Synthesizes a JPEG snapshot and an ~10s rolling context MP4 clip.
-6. The background uploader non-blockingly streams the event and evidence to Render over HTTPS.
-7. If internet is temporarily lost, events queue locally (up to 100 items) and retry with exponential backoff once reconnected.
+### Edge-to-Cloud Behavior:
+1. Laptop captures local frames from webcam `0`.
+2. Runs YOLOv8n object detection and ByteTrack tracking locally.
+3. Evaluates luggage stationarity and nearest-person heuristics.
+4. When an unattended bag triggers `ALERT`, it logs to local SQLite and queues an upload task.
+5. The background forwarder streams the alert and snapshot JPEG to Render via `POST /api/ingest/alerts`.
+6. Render creates a document in Cloud Firestore (`railguard_alerts`).
+7. If internet disconnects, the edge camera continues operating uninterrupted. Up to 100 alerts queue locally and retry with exponential backoff once reconnected.
 
 ---
 
-## 6. Configuring the Flutter Mobile App
+## 6. Flutter Mobile App Configuration
 
-The Flutter mobile application interfaces with the cloud backend through [`lib/services/railguard_api_service.dart`](file:///c:/Users/shanm/Downloads/RailSafe%20AI/lib/services/railguard_api_service.dart).
+The Flutter app interfaces with the cloud backend through [`lib/services/railguard_api_service.dart`](file:///c:/Users/shanm/Downloads/RailSafe%20AI/lib/services/railguard_api_service.dart).
 
-### Setting Cloud URL in App:
-In the app's settings screen (or [`LocalStorageService`](file:///c:/Users/shanm/Downloads/RailSafe%20AI/lib/services/local_storage_service.dart)):
-- Set Backend URL to: `https://railguard-vision-api.onrender.com`
-- Set Bearer Token to: `<YOUR_RAILGUARD_API_TOKEN>`
-
-### Available Mobile Operations:
-- **`getAlerts()`:** Fetches active and recent unattended luggage alerts.
-- **`reviewAlert(id, 'verified')`:** Field officer verifies alert on premises.
-- **`reviewAlert(id, 'false_alarm')`:** Field officer marks false alarm (e.g., owner was just sitting nearby outside camera angle).
-- **`getSnapshotUrl(id)`:** Loads snapshot evidence in app.
-- **`getClipUrl(id)`:** Plays context video evidence.
-- **`getFalseAlarmRate()`:** Computes running false-alarm rate across reviewed events.
+1. In the Flutter app settings (or [`LocalStorageService`](file:///c:/Users/shanm/Downloads/RailSafe%20AI/lib/services/local_storage_service.dart)), configure:
+   - **Backend Base URL:** `https://railguard-vision-api.onrender.com`
+2. When the user signs in with email/password via Firebase Authentication, `RailGuardApiService` automatically retrieves the user's real Firebase ID token via `AuthService.getIdToken()` and attaches:
+   ```text
+   Authorization: Bearer <Firebase_ID_Token>
+   ```
+3. Operators can:
+   - View recent unattended luggage alerts in real-time.
+   - Review an alert as **Verified** or **False Alarm**.
+   - The reviewing officer's Firebase UID is recorded on the Firestore document.
 
 ---
 
-## 7. API Reference Summary
+## 7. Cloud Firestore Security Rules
 
-| Method | Endpoint | Auth Required | Purpose |
-| :--- | :--- | :---: | :--- |
-| `GET` | `/health` | No | System health and storage status |
-| `POST`| `/api/ingest/alerts` | Agent Token | Multipart upload of alert + snapshot + clip |
-| `POST`| `/api/ingest/alerts/clear` | Agent Token | Notification that active alert has cleared |
-| `GET` | `/api/alerts` | API Token | List alerts (supports `?limit=50&unreviewed_only=true`) |
-| `GET` | `/api/alerts/{id}` | API Token | Retrieve single alert details |
-| `PATCH`| `/api/alerts/{id}/review` | API Token | Operator review: `{"review_status": "verified"\|"false_alarm"}` |
-| `GET` | `/api/alerts/{id}/snapshot` | API Token | Stream high-res JPEG snapshot (safe traversal guard) |
-| `GET` | `/api/alerts/{id}/clip` | API Token | Stream MP4 context video clip |
-| `GET` | `/api/alerts/stats/false-alarm-rate`| API Token | False alarm rate statistics |
-| `WSS` | `/api/ws/alerts` | API Token | WebSocket live event push feed |
+Ensure your `firestore.rules` has the following rule:
 
----
+```javascript
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
 
-## 8. Backup, Retention & Recovery Procedures
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
 
-### Disk Capacity & Evidence Retention
-- Snapshots: ~150 KB each.
-- 10-second MP4 clips: ~2.5 MB each.
-- A 1 GB persistent disk holds approximately **350 complete alert events** (snapshots + video clips).
-- To prevent disk exhaustion, configure periodic log pruning or extend disk size in Render dashboard (`Disks` > `Resize`).
+    // RailGuard Vision Alerts Collection
+    // Authenticated railway security officers can read alerts; client-side direct writes are blocked.
+    // All creation, updates, and reviews are mediated securely through FastAPI backend using Admin SDK.
+    match /railguard_alerts/{alertId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
 
-### Manual SQLite Backup Command (PowerShell):
-```powershell
-# If using Render SSH / Shell:
-sqlite3 /var/data/security_alerts.db ".backup '/var/data/backup_$(date +%Y%m%d).db'"
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
 ```
 
-### Rollback Process
-In the Render Dashboard:
-1. Navigate to **railguard-vision-api** > **Deploys**.
-2. Select the previous stable deploy commit.
-3. Click **Rollback to this deploy**.
-4. The persistent disk at `/var/data` remains untouched and reattaches immediately to the previous container version.
+---
+
+## 8. API Reference Summary
+
+| Method | Endpoint | Auth Header | Description |
+| :--- | :--- | :---: | :--- |
+| `GET` | `/health` | None | Public process liveness check for Render |
+| `GET` | `/ready` | Bearer Firebase ID Token | Protected Firestore database connectivity check |
+| `POST`| `/api/ingest/alerts` | Bearer Agent Token | Ingests alert & snapshot into Firestore (Idempotent) |
+| `POST`| `/api/ingest/alerts/clear` | Bearer Agent Token | Records cleared timestamp when bag is retrieved |
+| `GET` | `/api/alerts` | Bearer Firebase ID Token | Lists alerts with limit and review_status filters |
+| `GET` | `/api/alerts/{id}` | Bearer Firebase ID Token | Fetches alert details from Firestore |
+| `PATCH`| `/api/alerts/{id}/review` | Bearer Firebase ID Token | Records Verified / False Alarm with reviewer UID |
+| `GET` | `/api/alerts/{id}/snapshot`| Bearer Firebase ID Token | Streams JPEG evidence (path traversal guarded) |
+| `GET` | `/api/alerts/{id}/clip`| Bearer Firebase ID Token | Streams MP4 video clip |
+| `GET` | `/api/alerts/stats/false-alarm-rate`| Bearer Firebase ID Token | False alarm rate metrics from reviewed alerts |
+| `WSS` | `/api/ws/alerts` | Token Query Param | Real-time WebSocket push notifications |
 
 ---
 
-## 9. Security & Privacy Checklist
+## 9. Security & Privacy Safeguards
 
-- [x] **No Hardcoded Tokens:** Tokens are injected via environment variables only.
-- [x] **Path Traversal Protection:** All file streaming endpoints validate that resolved paths reside strictly inside allowed evidence subdirectories.
-- [x] **Idempotent Ingestion:** Retries with identical `event_uid` never create duplicate database rows.
-- [x] **Strict Safety Disclaimer:** Every alert payload displays `FOR HUMAN REVIEW ONLY`.
-- [x] **No Biometrics:** No facial recognition, age, gender, or demographic inferences are made.
-- [x] **Outbound-Only Edge Connection:** The laptop never opens listening ports or requires inbound internet tunnels.
+- [x] **No `/var/data` Dependency:** Deploys on Render Free without filesystem permission issues.
+- [x] **Cryptographic Auth:** Mobile operator requests are validated using Firebase Admin SDK public keys.
+- [x] **Separated Agent Ingestion:** Laptop edge camera uses a dedicated `RAILGUARD_AGENT_TOKEN`.
+- [x] **Idempotent Ingestion:** Duplicate event transmissions reuse `event_uid` as document ID, preventing duplicate records.
+- [x] **Traversal Prevention:** Evidence delivery enforces strict containment within container storage.
+- [x] **No Facial Recognition / Biometrics:** Completely strictly adheres to early-warning optical screening without demographic profiling.
