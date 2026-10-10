@@ -46,3 +46,10 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# AI Vision Weights and Logs
+*.pt
+railway_luggage_detection/logs/*.db
+railway_luggage_detection/logs/*.csv
+railway_luggage_detection/snapshots/*
+!railway_luggage_detection/snapshots/.gitkeep
