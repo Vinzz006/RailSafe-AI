@@ -1,25 +1,18 @@
-# RailGuard Vision — Render Free Cloud Deployment with Firebase Firestore
+# RailGuard Vision — Render Free Cloud Deployment with Firebase Realtime Database
 
 > [!IMPORTANT]
 > **FOR HUMAN REVIEW ONLY** — RailGuard Vision is an optical surveillance early-warning prototype engineered for Indian Railways station premises. Visible-light optical cameras **CANNOT detect explosives, narcotics, or chemical hazards**. Alerts prioritize locations for human security personnel (RPF/GRP) to deploy certified physical inspection tools (X-ray, Explosive Trace Detection / ETD, and canine squads). The system does not implement facial recognition, biometric profiling, or automated enforcement.
 
 ---
 
-## 1. Resolution of the `/var/data` PermissionError
+## 1. Cloud Persistence Architecture: Firebase Realtime Database
 
-### Root Cause Analysis
-During previous deployment attempts on Render, the backend process failed on startup with:
-```text
-PermissionError: [Errno 13] Permission denied: '/var/data'
-```
-**Why this occurred:**
-`app/api.py` was previously instantiating a local SQLite database at `/var/data/security_alerts.db` at the module top level. On the **Render Free Tier**, no persistent disk exists at `/var/data` (disks require a paid Starter plan), and container processes run as a standard non-root user without permissions to create directories at the filesystem root `/`. This caused `uvicorn` to crash during module import before binding to `$PORT` or serving `/health`.
-
-**How it is now resolved:**
-1. **Decoupled Cloud from SQLite:** The cloud API on Render no longer touches `/var/data` or uses local SQLite.
-2. **Cloud Firestore Persistence:** Cloud alert records, timestamps, and operator review states are persisted directly in **Cloud Firestore** (`railguard_alerts` collection).
-3. **100% Render Free Tier Compatible:** No attached persistent disk is required on Render.
-4. **Local Edge Preserved:** The station laptop continues using its local SQLite database (`data/security_alerts.db`) for real-time video buffering and offline resilience.
+### Architecture Overview
+1. **Decoupled Cloud from SQLite:** The cloud API on Render no longer touches `/var/data` or requires local SQLite disk storage.
+2. **Firebase Realtime Database (RTDB):** Persistent cloud alert records, timestamps, alert lifecycle, and operator review states are stored under `railguard/alerts/` with index at `railguard/event_uid_index/`.
+3. **100% Render Free Tier Compatible:** Runs on Render Free Tier with no persistent disk attached.
+4. **Firebase Storage for Binary Media:** JPEG snapshots and MP4 video clips are stored in Firebase Storage; RTDB only stores paths and URLs.
+5. **Local Edge Preserved:** The station laptop continues using its local SQLite database (`data/security_alerts.db`) for real-time video buffering and offline resilience.
 
 ---
 
@@ -49,11 +42,11 @@ PermissionError: [Errno 13] Permission denied: '/var/data'
 └──────────┬─────────────────┬─────────┘
            │                 │
            ▼                 ▼
-┌──────────────────┐ ┌──────────────────┐
-│ CLOUD FIRESTORE  │ │  FIREBASE AUTH   │
-│ Collection:      │ │ Cryptographic    │
-│ railguard_alerts │ │ Token Validation │
-└──────────────────┘ └──────────────────┘
+┌───────────────────────┐ ┌──────────────────┐
+│ FIREBASE REALTIME DB  │ │  FIREBASE AUTH   │
+│ Node:                 │ │ Cryptographic    │
+│ railguard/alerts/     │ │ Token Validation │
+└───────────────────────┘ └──────────────────┘
            ▲
            │ Authenticated HTTPS (Bearer <Firebase_ID_Token>)
 ┌──────────┴───────────────────────────┐
@@ -95,9 +88,11 @@ Under the **Environment** tab in Render, enter the following key-value pairs:
 | :--- | :--- | :--- |
 | `PYTHON_VERSION` | `3.10.13` | Recommended stable Python version |
 | `FIREBASE_PROJECT_ID` | `railsafe-ai-92d9f` | Your Firebase Project ID |
-| `FIRESTORE_ALERTS_COLLECTION` | `railguard_alerts` | Firestore collection for luggage alerts |
+| `FIREBASE_DATABASE_URL` | `https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/` | Firebase Realtime Database URL |
+| `RTDB_ALERTS_PATH` | `railguard/alerts` | RTDB path for luggage alerts |
 | `FIREBASE_STORAGE_BUCKET` | `railsafe-ai-92d9f.firebasestorage.app` | Default Firebase Storage bucket |
 | `ALLOW_DEV_AUTH_BYPASS` | `false` | Disables testing bypass in production |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:54313` | Comma-separated frontend origins permitted for CORS |
 | `RAILGUARD_AGENT_TOKEN` | *(Click **Generate** or enter random string)* | Secret token for station laptop agent |
 | `FIREBASE_SERVICE_ACCOUNT_JSON`| *(Paste JSON contents - see Step 3.4)* | Service account credentials secret |
 
@@ -130,7 +125,7 @@ curl -i https://railsafe-ai-backend.onrender.com/health
   "status": "healthy",
   "service": "RailGuard Vision Cloud Backend",
   "version": "1.0.0",
-  "persistence": "Cloud Firestore",
+  "persistence": "Firebase Realtime Database",
   "disclaimer": "FOR HUMAN REVIEW ONLY — Does not detect explosives, chemical substances, or narcotics."
 }
 ```
@@ -143,9 +138,10 @@ curl -i https://railsafe-ai-backend.onrender.com/ready
 ```json
 {
   "status": "ready",
-  "firestore_connected": true,
+  "rtdb_connected": true,
   "project_id": "railsafe-ai-92d9f",
-  "collection": "railguard_alerts"
+  "database_url": "https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/",
+  "alerts_path": "railguard/alerts"
 }
 ```
 
@@ -224,48 +220,75 @@ The Flutter app interfaces with the cloud backend through [`lib/services/railgua
 
 ---
 
-## 7. Cloud Firestore Security Rules
+## 7. Firebase Realtime Database Security Rules
 
-Ensure your `firestore.rules` has the following rule:
+Ensure your `database.rules.json` has restrictive rules that block direct client reads and writes while defining required query indexes:
 
-```javascript
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-
-    // Helper functions
-    function isAuthenticated() {
-      return request.auth != null;
-    }
-
-    // RailGuard Vision Alerts Collection
-    // Authenticated railway security officers can read alerts; client-side direct writes are blocked.
-    // All creation, updates, and reviews are mediated securely through FastAPI backend using Admin SDK.
-    match /railguard_alerts/{alertId} {
-      allow read: if isAuthenticated();
-      allow write: if false;
-    }
-
-    // Default deny
-    match /{document=**} {
-      allow read, write: if false;
+```json
+{
+  "rules": {
+    "railguard": {
+      "alerts": {
+        ".read": false,
+        ".write": false,
+        ".indexOn": [
+          "created_at_ms",
+          "review_status",
+          "camera_id",
+          "track_id",
+          "event_uid"
+        ]
+      },
+      "event_uid_index": {
+        ".read": false,
+        ".write": false
+      }
+    },
+    "$other": {
+      ".read": false,
+      ".write": false
     }
   }
 }
 ```
 
+### Deploying Realtime Database Rules via Firebase CLI
+Deploy the rules file without modifying Firestore rules:
+```bash
+firebase deploy --only database
+```
+
 ---
 
-## 8. API Reference Summary
+## 8. Firestore to Realtime Database Data Migration Utility
+
+If you have existing alert records in Cloud Firestore, run the provided standalone migration utility:
+
+```powershell
+cd "c:\Users\shanm\Downloads\RailSafe AI\RailGuard_Vision"
+
+# 1. Dry run (Inspect planned changes safely without writing to RTDB)
+python src/migrate_firestore_to_rtdb.py
+
+# 2. Live migration (Copies records into RTDB, skips existing records, preserves Firestore)
+python src/migrate_firestore_to_rtdb.py --live
+
+# 3. Force overwrite if re-migrating
+python src/migrate_firestore_to_rtdb.py --live --overwrite
+```
+
+---
+
+## 9. API Reference Summary
 
 | Method | Endpoint | Auth Header | Description |
-| :--- | :--- | :---: | :--- |
+| :--- | :--- | :--- | :--- |
 | `GET` | `/health` | None | Public process liveness check for Render |
-| `GET` | `/ready` | Bearer Firebase ID Token | Protected Firestore database connectivity check |
-| `POST`| `/api/ingest/alerts` | Bearer Agent Token | Ingests alert & snapshot into Firestore (Idempotent) |
+| `GET` | `/ready` | None | Public Realtime Database connectivity check |
+| `POST`| `/api/ingest/alerts` | Bearer Agent Token | Ingests alert & snapshot into RTDB (Idempotent) |
 | `POST`| `/api/ingest/alerts/clear` | Bearer Agent Token | Records cleared timestamp when bag is retrieved |
 | `GET` | `/api/alerts` | Bearer Firebase ID Token | Lists alerts with limit and review_status filters |
-| `GET` | `/api/alerts/{id}` | Bearer Firebase ID Token | Fetches alert details from Firestore |
+| `GET` | `/api/alerts/{id}` | Bearer Firebase ID Token | Fetches alert details from RTDB |
 | `PATCH`| `/api/alerts/{id}/review` | Bearer Firebase ID Token | Records Verified / False Alarm with reviewer UID |
 | `GET` | `/api/alerts/{id}/snapshot`| Bearer Firebase ID Token | Streams JPEG evidence (path traversal guarded) |
 | `GET` | `/api/alerts/{id}/clip`| Bearer Firebase ID Token | Streams MP4 video clip |
@@ -274,7 +297,7 @@ service cloud.firestore {
 
 ---
 
-## 9. Security & Privacy Safeguards
+## 10. Security & Privacy Safeguards
 
 - [x] **No `/var/data` Dependency:** Deploys on Render Free without filesystem permission issues.
 - [x] **Cryptographic Auth:** Mobile operator requests are validated using Firebase Admin SDK public keys.

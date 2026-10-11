@@ -1,4 +1,4 @@
-"""Unit and integration tests for RailGuard Vision FastAPI Cloud Backend with Firestore & Firebase Auth."""
+"""Unit and integration tests for RailGuard Vision FastAPI Cloud Backend with Realtime Database & Firebase Auth."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from app.api import app, get_repository
 from src.config import FirebaseConfig, SystemConfig
 
 
-class MockFirestoreRepository:
-    """Deterministic in-memory Firestore repository for isolated unit testing."""
+class MockRealtimeDatabaseRepository:
+    """Deterministic in-memory Realtime Database repository for isolated unit testing."""
 
     def __init__(self) -> None:
         self.documents: Dict[str, Dict[str, Any]] = {}
@@ -100,17 +100,21 @@ class MockFirestoreRepository:
         return false_alarms / total, total, false_alarms
 
 
+# Backward compatibility alias
+MockFirestoreRepository = MockRealtimeDatabaseRepository
+
+
 @pytest.fixture
 def test_env() -> Generator[dict, None, None]:
-    """Provide isolated test environment with mock Firestore repository and test credentials."""
-    mock_repo = MockFirestoreRepository()
+    """Provide isolated test environment with mock Realtime Database repository and test credentials."""
+    mock_repo = MockRealtimeDatabaseRepository()
 
     # Configure API module
     api_module.config.firebase.allow_dev_auth_bypass = True
     api_module.config.security.agent_token = "test-agent-token"
     api_module.config.security.api_token = "test-operator-token"
 
-    # Dependency override for Firestore repository
+    # Dependency override for Realtime Database repository
     app.dependency_overrides[get_repository] = lambda: mock_repo
 
     client = TestClient(app)
@@ -126,13 +130,13 @@ def test_env() -> Generator[dict, None, None]:
 
 
 def test_health_check(test_env: dict) -> None:
-    """Verify GET /health executes without requiring /var/data or Firestore connectivity."""
+    """Verify GET /health executes without requiring /var/data or RTDB connectivity."""
     client: TestClient = test_env["client"]
     res = client.get("/health")
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "healthy"
-    assert data["persistence"] == "Cloud Firestore"
+    assert data["persistence"] == "Firebase Realtime Database"
     assert "FOR HUMAN REVIEW ONLY" in data["disclaimer"]
     # Ensure no internal tokens or secrets are leaked
     body_str = res.text
@@ -149,22 +153,24 @@ def test_root_info_endpoint(test_env: dict) -> None:
     data = res.json()
     assert data["service"] == "RailGuard Vision Cloud Backend"
     assert data["status"] == "online"
+    assert data["persistence"] == "Firebase Realtime Database"
     assert data["endpoints"]["health"] == "/health"
     assert data["endpoints"]["readiness"] == "/ready"
 
 
 def test_readiness_check_healthy_and_unhealthy(test_env: dict) -> None:
-    """Verify GET /ready correctly handles healthy and unhealthy Firestore dependencies."""
+    """Verify GET /ready correctly handles healthy and unhealthy Realtime Database dependencies."""
     client: TestClient = test_env["client"]
-    repo: MockFirestoreRepository = test_env["repo"]
+    repo: MockRealtimeDatabaseRepository = test_env["repo"]
 
     # 1. Healthy state -> 200 OK without requiring authentication
     res = client.get("/ready")
     assert res.status_code == 200
     assert res.json()["status"] == "ready"
-    assert res.json()["firestore_connected"] is True
+    assert res.json()["rtdb_connected"] is True
+    assert "database_url" in res.json()
 
-    # 2. Unhealthy state (simulated Firestore disconnection) -> 503 Service Unavailable
+    # 2. Unhealthy state (simulated RTDB disconnection) -> 503 Service Unavailable
     repo.check_readiness = lambda: False
     res_down = client.get("/ready")
     assert res_down.status_code == 503
@@ -520,7 +526,7 @@ def test_cors_headers_on_500_response(test_env: dict) -> None:
 
     # Force repository to raise unexpected database error
     def failing_list_alerts(**kwargs):
-        raise RuntimeError("Unexpected Firestore connection failure")
+        raise RuntimeError("Unexpected Realtime Database connection failure")
 
     repo.list_alerts = failing_list_alerts
 

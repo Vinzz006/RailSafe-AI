@@ -8,7 +8,7 @@ import os
 from typing import Any, Dict, Optional
 
 import firebase_admin
-from firebase_admin import auth as fb_auth, credentials, firestore, storage
+from firebase_admin import auth as fb_auth, credentials, db as fb_db, firestore, storage
 
 from src.config import FirebaseConfig
 
@@ -29,6 +29,14 @@ def get_firebase_app(config: Optional[FirebaseConfig] = None) -> Optional[fireba
         return _firebase_app
 
     project_id = config.project_id if config else os.getenv("FIREBASE_PROJECT_ID", "railsafe-ai-92d9f")
+    database_url = (
+        config.database_url
+        if config and config.database_url
+        else os.getenv(
+            "FIREBASE_DATABASE_URL",
+            "https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/",
+        )
+    )
     sa_json = config.service_account_json if config else os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     sa_path = config.service_account_path if config else os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
     storage_bucket = (
@@ -55,6 +63,8 @@ def get_firebase_app(config: Optional[FirebaseConfig] = None) -> Optional[fireba
             raise ValueError(f"Failed to read service account from {sa_path}: {e}")
 
     app_options = {"projectId": project_id}
+    if database_url:
+        app_options["databaseURL"] = database_url
     if storage_bucket:
         app_options["storageBucket"] = storage_bucket
 
@@ -75,8 +85,27 @@ def get_firebase_app(config: Optional[FirebaseConfig] = None) -> Optional[fireba
         return None
 
 
+def get_realtime_db(config: Optional[FirebaseConfig] = None) -> Any:
+    """Return Realtime Database reference. Raises RuntimeError if Firebase is uninitialized."""
+    app = get_firebase_app(config)
+    if not app:
+        raise RuntimeError(
+            "Firebase Admin SDK is not initialized. Please provide FIREBASE_SERVICE_ACCOUNT_JSON "
+            "or FIREBASE_SERVICE_ACCOUNT_PATH."
+        )
+    database_url = (
+        config.database_url
+        if config and config.database_url
+        else os.getenv(
+            "FIREBASE_DATABASE_URL",
+            "https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/",
+        )
+    )
+    return fb_db.reference("/", app=app, url=database_url)
+
+
 def get_firestore_db(config: Optional[FirebaseConfig] = None) -> Any:
-    """Return Firestore client instance. Raises RuntimeError if Firebase is uninitialized."""
+    """Return Firestore client instance. Maintained for migration utilities."""
     app = get_firebase_app(config)
     if not app:
         raise RuntimeError(

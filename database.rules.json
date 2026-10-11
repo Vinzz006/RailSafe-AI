@@ -1,0 +1,17 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "railguard": {
+      "alerts": {
+        ".read": false,
+        ".write": false,
+        ".indexOn": ["created_at_ms", "review_status", "camera_id", "track_id", "event_uid"]
+      },
+      "event_uid_index": {
+        ".read": false,
+        ".write": false
+      }
+    }
+  }
+}
