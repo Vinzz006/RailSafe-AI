@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -77,8 +78,8 @@ class RealtimeDatabaseAlertRepository:
     def create_or_update_alert(self, alert_data: Dict[str, Any]) -> Tuple[str, bool]:
         """Ingest an alert document into Firebase Realtime Database.
         
-        Uses sanitized event_uid as node key and maintains an event_uid_index
-        to guarantee idempotency during client network retries.
+        Uses sanitized event_uid as node key, disambiguates sanitization collisions,
+        and uses an atomic transaction to guarantee idempotency under concurrent ingestion.
         
         Returns:
             (alert_id, is_newly_created: bool)
@@ -87,13 +88,31 @@ class RealtimeDatabaseAlertRepository:
         if not raw_uid:
             raise ValueError("event_uid is required for alert ingestion.")
 
-        alert_id = sanitize_rtdb_key(raw_uid)
+        base_id = sanitize_rtdb_key(raw_uid)
+        alert_id = base_id
 
-        # Idempotency check: inspect if document already exists
+        # Idempotency and collision detection
         existing = self.alerts_ref.child(alert_id).get()
         if existing is not None:
-            logger.info("Alert %s already exists in Realtime Database. Suppressing duplicate write.", raw_uid)
-            return alert_id, False
+            existing_uid = existing.get("event_uid") if isinstance(existing, dict) else None
+            if existing_uid == raw_uid:
+                logger.info("Alert %s already exists in Realtime Database. Suppressing duplicate write.", raw_uid)
+                return alert_id, False
+            # Key collision: two distinct event_uids sanitized to the same base key
+            hash_suffix = hashlib.sha256(str(raw_uid).encode("utf-8")).hexdigest()[:8]
+            alert_id = f"{base_id}_{hash_suffix}"
+            logger.warning(
+                "Sanitization collision detected between '%s' and '%s'. Disambiguated key to '%s'.",
+                existing_uid,
+                raw_uid,
+                alert_id,
+            )
+            existing_disambiguated = self.alerts_ref.child(alert_id).get()
+            if existing_disambiguated is not None:
+                d_uid = existing_disambiguated.get("event_uid") if isinstance(existing_disambiguated, dict) else None
+                if d_uid == raw_uid:
+                    logger.info("Disambiguated alert %s already exists. Suppressing duplicate write.", raw_uid)
+                    return alert_id, False
 
         now = datetime.datetime.now(datetime.timezone.utc)
         now_iso = now.isoformat()
@@ -137,15 +156,42 @@ class RealtimeDatabaseAlertRepository:
             ),
         }
 
-        # Write alert payload and update event index
-        self.alerts_ref.child(alert_id).set(doc_payload)
-        try:
-            self.index_ref.child(alert_id).set(raw_uid)
-        except Exception as e:
-            logger.warning("Could not update event_uid_index for %s: %s", alert_id, e)
+        # Atomically insert using transaction if available to prevent concurrent duplicate inserts
+        is_newly_created = False
+        target_ref = self.alerts_ref.child(alert_id)
 
-        logger.info("Created alert record %s in Realtime Database under %s/alerts", alert_id, self.base_path)
-        return alert_id, True
+        def txn_insert(current_val: Any) -> Any:
+            nonlocal is_newly_created
+            if current_val is None:
+                is_newly_created = True
+                return doc_payload
+            return current_val
+
+        try:
+            if hasattr(target_ref, "transaction") and callable(getattr(target_ref, "transaction")):
+                target_ref.transaction(txn_insert)
+            else:
+                if target_ref.get() is None:
+                    target_ref.set(doc_payload)
+                    is_newly_created = True
+                else:
+                    is_newly_created = False
+        except Exception as e:
+            logger.warning("RTDB transaction issue on %s: %s; falling back to direct write.", alert_id, e)
+            if target_ref.get() is None:
+                target_ref.set(doc_payload)
+                is_newly_created = True
+            else:
+                is_newly_created = False
+
+        if is_newly_created:
+            try:
+                self.index_ref.child(alert_id).set(raw_uid)
+            except Exception as e:
+                logger.warning("Could not update event_uid_index for %s: %s", alert_id, e)
+            logger.info("Created alert record %s in Realtime Database under %s/alerts", alert_id, self.base_path)
+
+        return alert_id, is_newly_created
 
     def get_alert(self, alert_id: str) -> Optional[Dict[str, Any]]:
         """Fetch alert document by alert ID (sanitized event_uid)."""
@@ -228,14 +274,19 @@ class RealtimeDatabaseAlertRepository:
                         continue
                     results.append(item)
 
-        # Sort in memory descending by created_at_ms or created_at
-        results.sort(
-            key=lambda x: (
-                x.get("created_at_ms")
-                or iso_to_epoch_ms(x.get("created_at") or x.get("timestamp"))
-            ),
-            reverse=True,
-        )
+        # Sort in memory descending by created_at_ms or created_at (handling malformed strings/nulls safely)
+        def _extract_sort_ts(x: Dict[str, Any]) -> int:
+            ms = x.get("created_at_ms")
+            if isinstance(ms, (int, float)):
+                return int(ms)
+            if isinstance(ms, str):
+                try:
+                    return int(float(ms))
+                except ValueError:
+                    pass
+            return iso_to_epoch_ms(x.get("created_at") or x.get("timestamp"))
+
+        results.sort(key=_extract_sort_ts, reverse=True)
 
         return results[:limit]
 

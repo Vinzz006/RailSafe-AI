@@ -483,9 +483,10 @@ void main() {
         return http.Response(
           jsonEncode({
             "status": "ready",
-            "firestore_connected": true,
+            "rtdb_connected": true,
             "project_id": "railsafe-ai-92d9f",
-            "collection": "railguard_alerts",
+            "database_url": "https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/",
+            "alerts_path": "railguard/alerts",
           }),
           200,
         );
@@ -495,8 +496,13 @@ void main() {
       final ready = await service.checkReadiness();
 
       expect(ready["ready"], isTrue);
-      expect(ready["firestore_connected"], isTrue);
+      expect(ready["rtdb_connected"], isTrue);
       expect(ready["project_id"], equals("railsafe-ai-92d9f"));
+      expect(
+        ready["database_url"],
+        equals("https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/"),
+      );
+      expect(ready["alerts_path"], equals("railguard/alerts"));
     });
 
     test('getFalseAlarmRate queries /api/alerts/stats/false-alarm-rate with auth', () async {

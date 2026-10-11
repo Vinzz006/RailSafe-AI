@@ -119,6 +119,13 @@ class MockRTDBRef:
         existing.update(val)
         self.set(existing)
 
+    def transaction(self, update_fn: Any) -> Any:
+        current = self.get()
+        new_val = update_fn(current)
+        if new_val is not None:
+            self.set(new_val)
+        return new_val
+
     def order_by_child(self, child_name: str) -> MockRTDBQuery:
         data = self.get() or {}
         return MockRTDBQuery(data if isinstance(data, dict) else {}, order_by_child=child_name)
@@ -349,3 +356,86 @@ def test_false_alarm_rate_calculation(rtdb_repo) -> None:
     assert rate == 0.5
     assert total == 2
     assert false_alarms == 1
+
+
+def test_sanitization_collision_disambiguation(rtdb_repo) -> None:
+    """Verify that two distinct event_uids that sanitize to the same base key do not overwrite each other."""
+    repo, tree = rtdb_repo
+
+    # Both 'EVT/001' and 'EVT.001' sanitize to 'EVT_001'
+    alert1 = {
+        "event_uid": "EVT/001",
+        "timestamp": "2026-10-11T01:00:00Z",
+        "camera_id": "CAM-01",
+        "track_id": 1,
+        "object_class": "bag",
+        "event_duration": 5.0,
+        "reason": "First alert",
+    }
+    alert2 = {
+        "event_uid": "EVT.001",
+        "timestamp": "2026-10-11T01:01:00Z",
+        "camera_id": "CAM-01",
+        "track_id": 2,
+        "object_class": "suitcase",
+        "event_duration": 8.0,
+        "reason": "Collision alert with distinct event_uid",
+    }
+
+    id1, created1 = repo.create_or_update_alert(alert1)
+    assert created1 is True
+    assert id1 == "EVT_001"
+
+    id2, created2 = repo.create_or_update_alert(alert2)
+    assert created2 is True
+    assert id2 != id1
+    assert id2.startswith("EVT_001_")
+
+    # Verify both records coexist in the database with their respective event_uids
+    doc1 = repo.get_alert(id1)
+    doc2 = repo.get_alert(id2)
+    assert doc1 is not None and doc1["event_uid"] == "EVT/001"
+    assert doc2 is not None and doc2["event_uid"] == "EVT.001"
+
+    # Idempotent re-ingestion of both
+    id1_retry, created1_retry = repo.create_or_update_alert(alert1)
+    assert id1_retry == id1
+    assert created1_retry is False
+
+    id2_retry, created2_retry = repo.create_or_update_alert(alert2)
+    assert id2_retry == id2
+    assert created2_retry is False
+
+
+def test_list_alerts_handles_malformed_records(rtdb_repo) -> None:
+    """Verify list_alerts does not crash when RTDB contains non-dict or malformed records."""
+    repo, tree = rtdb_repo
+
+    # Add a valid alert
+    repo.create_or_update_alert({
+        "event_uid": "EVT-VALID-01",
+        "timestamp": "2026-10-11T02:00:00Z",
+        "camera_id": "CAM-01",
+        "track_id": 1,
+        "object_class": "bag",
+        "event_duration": 5.0,
+        "reason": "Valid alert",
+    })
+
+    # Inject legacy malformed records directly into tree
+    alerts_node = tree["railguard"]["alerts"]
+    alerts_node["MALFORMED_STRING_MS"] = {
+        "id": "MALFORMED_STRING_MS",
+        "event_uid": "EVT-BAD-1",
+        "created_at_ms": "not-an-int",
+        "created_at": "invalid-date",
+        "camera_id": "CAM-01",
+        "track_id": 2,
+        "review_status": "unreviewed",
+    }
+
+    alerts = repo.list_alerts(limit=10)
+    assert len(alerts) >= 1
+    # Verify the valid alert is present
+    uids = [a["event_uid"] for a in alerts]
+    assert "EVT-VALID-01" in uids

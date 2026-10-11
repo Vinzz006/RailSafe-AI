@@ -570,7 +570,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      "Production cloud backend hosting computer vision alerts, Firestore persistence, and operator evidence streaming. Secured by Firebase Authentication.",
+                      "Production cloud backend hosting computer vision alerts, Firebase Realtime Database persistence, and operator evidence streaming. Secured by Firebase Authentication.",
                       style: GoogleFonts.inter(
                         color: AppColors.textSecondary,
                         fontSize: 12.5,
@@ -639,9 +639,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                       _isTestingRailguard = false;
                                       if (healthRes["success"] == true) {
                                         _railguardHealthOk = true;
-                                        final persist = healthRes["persistence"] ?? "Cloud Firestore";
+                                        final persist = healthRes["persistence"] ?? "Firebase Realtime Database";
                                         final readyStr = readyRes["ready"] == true
-                                            ? "Ready (Firestore OK)"
+                                            ? (readyRes["rtdb_connected"] == true ? "Ready (RTDB OK)" : "Ready (DB OK)")
                                             : "Readiness: ${readyRes["message"] ?? 'Pending'}";
                                         _railguardHealthStatus =
                                             "Online! Service: ${healthRes["status"] ?? 'healthy'}\n$persist | $readyStr";

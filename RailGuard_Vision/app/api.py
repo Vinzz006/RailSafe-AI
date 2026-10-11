@@ -214,14 +214,56 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 # ============================================================================
 def verify_firebase_operator(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(security_scheme),
+) -> Dict[str, Any]:
+    """Verify Firebase ID token for mobile operators and screening officers (Header Bearer only)."""
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token. Please provide a Bearer Firebase ID token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    raw_token = credentials.credentials.strip()
+
+    # Allow development / demo token bypass if explicitly enabled (strictly forbidden in production)
+    is_production = os.getenv("RENDER") is not None or os.getenv("ENVIRONMENT", "").lower() == "production"
+    if config.firebase.allow_dev_auth_bypass and not is_production and raw_token in (
+        "DEMO_OFFICER_TOKEN",
+        "dev-test-token",
+        "test-operator-token",
+        config.security.api_token,
+    ):
+        return {
+            "uid": "dev-operator-uid",
+            "email": "operator@railsafe.local",
+            "name": "Screening Operator",
+            "role": "operator",
+        }
+
+    try:
+        decoded_claims = verify_firebase_id_token(
+            token=raw_token,
+            allow_dev_bypass=config.firebase.allow_dev_auth_bypass,
+        )
+        return decoded_claims
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def verify_firebase_operator_media(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security_scheme),
     token_query: Optional[str] = Query(None, alias="token"),
 ) -> Dict[str, Any]:
-    """Verify Firebase ID token for mobile operators and screening officers."""
+    """Verify Firebase ID token for media streaming endpoints supporting header or URL token."""
     raw_token = None
-    if credentials:
-        raw_token = credentials.credentials
-    elif token_query:
-        raw_token = token_query
+    if credentials and credentials.credentials:
+        raw_token = credentials.credentials.strip()
+    elif token_query and token_query.strip():
+        raw_token = token_query.strip()
 
     if not raw_token:
         raise HTTPException(
@@ -230,8 +272,8 @@ def verify_firebase_operator(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Allow development / demo token bypass if explicitly enabled
-    if config.firebase.allow_dev_auth_bypass and raw_token in (
+    is_production = os.getenv("RENDER") is not None or os.getenv("ENVIRONMENT", "").lower() == "production"
+    if config.firebase.allow_dev_auth_bypass and not is_production and raw_token in (
         "DEMO_OFFICER_TOKEN",
         "dev-test-token",
         "test-operator-token",
@@ -260,21 +302,22 @@ def verify_firebase_operator(
 
 def verify_agent_token(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(security_scheme),
-    token_query: Optional[str] = Query(None, alias="token"),
 ) -> str:
-    """Verify dedicated secret token for station laptop camera ingestion agent."""
-    provided_token = None
-    if credentials:
-        provided_token = credentials.credentials
-    elif token_query:
-        provided_token = token_query
+    """Verify dedicated secret token for station laptop camera ingestion agent via Bearer header."""
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Invalid camera ingestion agent token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    expected_agent = config.security.agent_token
+    provided_token = credentials.credentials.strip()
+    expected_agent = (config.security.agent_token or "").strip()
 
     if (
         not provided_token
         or not expected_agent
-        or not hmac.compare_digest(provided_token.strip(), expected_agent.strip())
+        or not hmac.compare_digest(provided_token, expected_agent)
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -610,7 +653,13 @@ def get_alerts(
 
     try:
         docs = repo.list_alerts(limit=limit, review_status=status_filter, unreviewed_only=unreviewed_only)
-        return [serialize_rtdb_alert(d) for d in docs]
+        alerts: List[AlertResponse] = []
+        for d in docs:
+            try:
+                alerts.append(serialize_rtdb_alert(d))
+            except Exception as item_err:
+                logger.warning("Skipping malformed alert in list_alerts: %s", item_err)
+        return alerts
     except HTTPException:
         raise
     except Exception as e:
@@ -692,7 +741,7 @@ def get_false_alarm_rate(
 @app.get("/api/alerts/{alert_id}/snapshot", tags=["Evidence"])
 def get_alert_snapshot(
     alert_id: str,
-    _user: Dict[str, Any] = Depends(verify_firebase_operator),
+    _user: Dict[str, Any] = Depends(verify_firebase_operator_media),
     repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> Response:
     """Retrieve verified JPEG snapshot evidence for an alert."""
@@ -701,7 +750,7 @@ def get_alert_snapshot(
         raise HTTPException(status_code=404, detail="Alert not found.")
 
     snap_key = doc.get("snapshot_key")
-    if not snap_key:
+    if not snap_key or ".." in snap_key or snap_key.startswith("/"):
         raise HTTPException(status_code=404, detail="No snapshot registered for this alert.")
 
     snap_file = CONTAINER_SNAPSHOTS_DIR / snap_key
@@ -728,7 +777,7 @@ def get_alert_snapshot(
 @app.get("/api/alerts/{alert_id}/clip", tags=["Evidence"])
 def get_alert_clip(
     alert_id: str,
-    _user: Dict[str, Any] = Depends(verify_firebase_operator),
+    _user: Dict[str, Any] = Depends(verify_firebase_operator_media),
     repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
 ) -> Response:
     """Retrieve contextual MP4 video clip for an alert."""
@@ -737,7 +786,7 @@ def get_alert_clip(
         raise HTTPException(status_code=404, detail="Alert not found.")
 
     clip_key = doc.get("clip_key")
-    if not clip_key:
+    if not clip_key or ".." in clip_key or clip_key.startswith("/"):
         raise HTTPException(status_code=404, detail="No video clip available for this alert.")
 
     clip_file = CONTAINER_CLIPS_DIR / clip_key

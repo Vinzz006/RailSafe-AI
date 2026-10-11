@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from typing import Any, Dict, Optional
 
 import firebase_admin
@@ -15,74 +16,91 @@ from src.config import FirebaseConfig
 logger = logging.getLogger("railguard_firebase")
 
 _firebase_app: Optional[firebase_admin.App] = None
+_app_lock = threading.Lock()
 
 
 def get_firebase_app(config: Optional[FirebaseConfig] = None) -> Optional[firebase_admin.App]:
-    """Initialize or retrieve the Firebase Admin app instance."""
+    """Initialize or retrieve the Firebase Admin app instance thread-safely."""
     global _firebase_app
 
     if _firebase_app is not None:
         return _firebase_app
 
-    if len(firebase_admin._apps) > 0:
-        _firebase_app = firebase_admin.get_app()
-        return _firebase_app
+    with _app_lock:
+        if _firebase_app is not None:
+            return _firebase_app
 
-    project_id = config.project_id if config else os.getenv("FIREBASE_PROJECT_ID", "railsafe-ai-92d9f")
-    database_url = (
-        config.database_url
-        if config and config.database_url
-        else os.getenv(
-            "FIREBASE_DATABASE_URL",
-            "https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/",
+        if len(firebase_admin._apps) > 0:
+            try:
+                _firebase_app = firebase_admin.get_app()
+                return _firebase_app
+            except Exception:
+                pass
+
+        project_id = config.project_id if config else os.getenv("FIREBASE_PROJECT_ID", "railsafe-ai-92d9f")
+        database_url = (
+            config.database_url
+            if config and config.database_url
+            else os.getenv(
+                "FIREBASE_DATABASE_URL",
+                "https://railsafe-ai-92d9f-default-rtdb.asia-southeast1.firebasedatabase.app/",
+            )
         )
-    )
-    sa_json = config.service_account_json if config else os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-    sa_path = config.service_account_path if config else os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
-    storage_bucket = (
-        config.storage_bucket if config else os.getenv("FIREBASE_STORAGE_BUCKET", "railsafe-ai-92d9f.firebasestorage.app")
-    )
-
-    cred: Optional[credentials.Base] = None
-
-    if sa_json:
-        try:
-            cert_dict = json.loads(sa_json)
-            cred = credentials.Certificate(cert_dict)
-            logger.info("Initializing Firebase Admin with service account JSON from environment secret.")
-        except Exception as e:
-            logger.error("Failed to parse FIREBASE_SERVICE_ACCOUNT_JSON: %s", e)
-            raise ValueError(f"Invalid FIREBASE_SERVICE_ACCOUNT_JSON format: {e}")
-
-    elif sa_path and os.path.isfile(sa_path):
-        try:
-            cred = credentials.Certificate(sa_path)
-            logger.info("Initializing Firebase Admin with service account file: %s", sa_path)
-        except Exception as e:
-            logger.error("Failed to load service account certificate from %s: %s", sa_path, e)
-            raise ValueError(f"Failed to read service account from {sa_path}: {e}")
-
-    app_options = {"projectId": project_id}
-    if database_url:
-        app_options["databaseURL"] = database_url
-    if storage_bucket:
-        app_options["storageBucket"] = storage_bucket
-
-    try:
-        if cred:
-            _firebase_app = firebase_admin.initialize_app(cred, options=app_options)
-        else:
-            # Attempt default application credentials (e.g. Cloud Run or Google Cloud environment)
-            _firebase_app = firebase_admin.initialize_app(options=app_options)
-            logger.info("Initialized Firebase Admin using default credentials for project: %s", project_id)
-        return _firebase_app
-    except Exception as e:
-        logger.warning(
-            "Firebase Admin SDK initialization deferred or failed: %s. "
-            "Ensure FIREBASE_SERVICE_ACCOUNT_JSON is configured on Render.",
-            e,
+        sa_json = config.service_account_json if config else os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+        sa_path = config.service_account_path if config else os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+        storage_bucket = (
+            config.storage_bucket
+            if config and config.storage_bucket
+            else os.getenv("FIREBASE_STORAGE_BUCKET", "railsafe-ai-92d9f.firebasestorage.app")
         )
-        return None
+
+        cred: Optional[credentials.Base] = None
+
+        if sa_json and sa_json.strip():
+            try:
+                cert_dict = json.loads(sa_json)
+                cred = credentials.Certificate(cert_dict)
+                logger.info("Initializing Firebase Admin with service account JSON from environment secret.")
+            except Exception as e:
+                logger.error("Failed to parse FIREBASE_SERVICE_ACCOUNT_JSON: %s", e)
+                raise ValueError(f"Invalid FIREBASE_SERVICE_ACCOUNT_JSON format: {e}")
+
+        elif sa_path and sa_path.strip():
+            if not os.path.isfile(sa_path.strip()):
+                raise FileNotFoundError(f"Configured FIREBASE_SERVICE_ACCOUNT_PATH does not exist: {sa_path}")
+            try:
+                cred = credentials.Certificate(sa_path.strip())
+                logger.info("Initializing Firebase Admin with service account file: %s", sa_path)
+            except Exception as e:
+                logger.error("Failed to load service account certificate from %s: %s", sa_path, e)
+                raise ValueError(f"Failed to read service account from {sa_path}: {e}")
+
+        app_options = {"projectId": project_id}
+        if database_url:
+            app_options["databaseURL"] = database_url
+        if storage_bucket:
+            app_options["storageBucket"] = storage_bucket
+
+        try:
+            if cred:
+                _firebase_app = firebase_admin.initialize_app(cred, options=app_options)
+            else:
+                _firebase_app = firebase_admin.initialize_app(options=app_options)
+                logger.info("Initialized Firebase Admin using default credentials for project: %s", project_id)
+            return _firebase_app
+        except ValueError as ve:
+            if "already exists" in str(ve).lower():
+                _firebase_app = firebase_admin.get_app()
+                return _firebase_app
+            logger.error("Firebase Admin SDK initialization ValueError: %s", ve)
+            return None
+        except Exception as e:
+            logger.warning(
+                "Firebase Admin SDK initialization deferred or failed: %s. "
+                "Ensure FIREBASE_SERVICE_ACCOUNT_JSON is configured on Render.",
+                e,
+            )
+            return None
 
 
 def get_realtime_db(config: Optional[FirebaseConfig] = None) -> Any:
@@ -124,8 +142,9 @@ def verify_firebase_id_token(token: str, allow_dev_bypass: bool = False) -> Dict
     if not token or not token.strip():
         raise ValueError("Token is empty or missing.")
 
-    # Optional development bypass token for offline local unit tests
-    if allow_dev_bypass and token in (
+    # Optional development bypass token for offline local unit tests (strictly forbidden in production)
+    is_production = os.getenv("RENDER") is not None or os.getenv("ENVIRONMENT", "").lower() == "production"
+    if allow_dev_bypass and not is_production and token in (
         "DEMO_OFFICER_TOKEN",
         "dev-test-token",
         "test-valid-firebase-token",
@@ -176,6 +195,10 @@ def upload_evidence_blob(
     config: Optional[FirebaseConfig] = None,
 ) -> bool:
     """Upload binary evidence to Firebase Storage bucket."""
+    if not blob_path or ".." in blob_path or blob_path.startswith("/"):
+        logger.warning("Rejected invalid evidence upload path: %s", blob_path)
+        return False
+
     bucket = get_storage_bucket(config)
     if not bucket:
         return False
@@ -194,6 +217,10 @@ def download_evidence_blob(
     config: Optional[FirebaseConfig] = None,
 ) -> Optional[bytes]:
     """Download binary evidence from Firebase Storage bucket."""
+    if not blob_path or ".." in blob_path or blob_path.startswith("/"):
+        logger.warning("Rejected invalid evidence download path: %s", blob_path)
+        return None
+
     bucket = get_storage_bucket(config)
     if not bucket:
         return None

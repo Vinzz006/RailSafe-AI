@@ -58,4 +58,8 @@ railway_luggage_detection/snapshots/*
 .env
 .env.*
 *.env
+*serviceAccount*.json
+*service-account*.json
+firebase-credentials*.json
+serviceAccountKey.json
 

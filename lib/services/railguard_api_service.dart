@@ -290,7 +290,7 @@ class RailGuardApiService {
           "success": true,
           "status": decoded["status"],
           "version": decoded["version"],
-          "persistence": decoded["persistence"] ?? "Cloud Firestore",
+          "persistence": decoded["persistence"] ?? "Firebase Realtime Database",
           "disclaimer": decoded["disclaimer"],
         };
       }
@@ -316,11 +316,16 @@ class RailGuardApiService {
       final res = await _client.get(uri).timeout(const Duration(seconds: 12));
       if (res.statusCode == 200) {
         final decoded = jsonDecode(res.body) as Map<String, dynamic>;
+        final isRtdb = decoded["rtdb_connected"] == true;
+        final isFirestore = decoded["firestore_connected"] == true;
         return {
           "ready": true,
-          "firestore_connected": decoded["firestore_connected"] == true,
+          "rtdb_connected": isRtdb,
+          "firestore_connected": isFirestore || isRtdb,
           "project_id": decoded["project_id"],
-          "collection": decoded["collection"],
+          "database_url": decoded["database_url"],
+          "alerts_path": decoded["alerts_path"],
+          "collection": decoded["collection"] ?? decoded["alerts_path"],
         };
       }
       return {
