@@ -46,6 +46,7 @@ from src.firebase_service import (
     verify_firebase_id_token,
 )
 from src.realtime_database_repository import RealtimeDatabaseAlertRepository
+from src.telemetry_repository import RealtimeDatabaseTelemetryRepository
 
 # Configure sanitized logging
 logging.basicConfig(
@@ -102,10 +103,11 @@ ws_manager = WebSocketManager()
 # Lazy Repository Access
 # ============================================================================
 _repository_instance: Optional[RealtimeDatabaseAlertRepository] = None
+_telemetry_repo_instance: Optional[RealtimeDatabaseTelemetryRepository] = None
 
 
 def get_repository() -> RealtimeDatabaseAlertRepository:
-    """Lazily initialize and return the Realtime Database repository instance."""
+    """Lazily initialize and return the Realtime Database alert repository instance."""
     global _repository_instance
     if _repository_instance is None:
         try:
@@ -120,6 +122,24 @@ def get_repository() -> RealtimeDatabaseAlertRepository:
                 detail="Firebase Realtime Database persistence layer is unavailable. Check server configuration.",
             )
     return _repository_instance
+
+
+def get_telemetry_repository() -> RealtimeDatabaseTelemetryRepository:
+    """Lazily initialize and return the Realtime Database telemetry repository instance."""
+    global _telemetry_repo_instance
+    if _telemetry_repo_instance is None:
+        try:
+            get_firebase_app(config.firebase)
+            _telemetry_repo_instance = RealtimeDatabaseTelemetryRepository(
+                base_path="railguard"
+            )
+        except Exception as e:
+            logger.error("Failed to connect to Firebase Realtime Database for telemetry: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Firebase Realtime Database telemetry layer is unavailable. Check server configuration.",
+            )
+    return _telemetry_repo_instance
 
 
 # ============================================================================
@@ -468,9 +488,12 @@ def health_check() -> Dict[str, Any]:
 @app.get("/ready", tags=["System"])
 def readiness_check(
     repo: RealtimeDatabaseAlertRepository = Depends(get_repository),
+    telemetry_repo: RealtimeDatabaseTelemetryRepository = Depends(get_telemetry_repository),
 ) -> Dict[str, Any]:
     """Public readiness check confirming Realtime Database accessibility without disclosing secrets."""
-    if not repo.check_readiness():
+    alert_ready = repo.check_readiness()
+    telemetry_ready = telemetry_repo.check_readiness()
+    if not alert_ready or not telemetry_ready:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Firebase Realtime Database unavailable.",
@@ -478,9 +501,11 @@ def readiness_check(
     return {
         "status": "ready",
         "rtdb_connected": True,
+        "telemetry_rtdb_connected": True,
         "project_id": config.firebase.project_id,
         "database_url": config.firebase.database_url,
         "alerts_path": config.firebase.rtdb_alerts_path,
+        "telemetry_path": "railguard/telemetry",
     }
 
 
@@ -843,6 +868,198 @@ async def websocket_alerts_endpoint(
         ws_manager.disconnect(websocket)
     except Exception:
         ws_manager.disconnect(websocket)
+
+
+
+# ============================================================================
+# Sensor Telemetry Endpoints (ESP32 Physical Gas Telemetry -> Cloud RTDB)
+# ============================================================================
+@app.post("/api/telemetry", tags=["Telemetry"], status_code=status.HTTP_201_CREATED)
+@app.post("/telemetry", tags=["Telemetry"], status_code=status.HTTP_201_CREATED)
+async def ingest_telemetry(
+    request: Request,
+    user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: RealtimeDatabaseTelemetryRepository = Depends(get_telemetry_repository),
+) -> Dict[str, Any]:
+    """Ingest a single physical sensor telemetry frame or a batch of frames into RTDB.
+    
+    Protected by operator Firebase ID token (Authentication header).
+    Machine-to-machine agent token is strictly rejected here.
+    """
+    try:
+        body = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {e}")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Telemetry payload must be a JSON object.")
+
+    try:
+        # Check if batch ingestion
+        if "readings" in body and isinstance(body["readings"], list):
+            saved_list = repo.ingest_batch(body["readings"])
+            return {
+                "status": "ok",
+                "count": len(saved_list),
+                "readings": saved_list,
+                "message": f"Successfully ingested {len(saved_list)} telemetry frames.",
+            }
+        else:
+            saved = repo.ingest_reading(body)
+            return {
+                "status": "ok",
+                "count": 1,
+                "reading": saved,
+                "message": "Telemetry frame successfully recorded in Realtime Database.",
+            }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to ingest telemetry into Realtime Database: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to record telemetry into persistence layer.",
+        )
+
+
+@app.get("/api/telemetry/latest", tags=["Telemetry"])
+@app.get("/telemetry/latest", tags=["Telemetry"])
+def get_latest_telemetry(
+    device_id: str = Query(..., min_length=1, max_length=64),
+    user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: RealtimeDatabaseTelemetryRepository = Depends(get_telemetry_repository),
+) -> Dict[str, Any]:
+    """Retrieve the latest known physical sensor reading for a specific device."""
+    reading = repo.get_latest_reading(device_id)
+    if not reading:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No telemetry readings found for device '{device_id}'.",
+        )
+    return {
+        "status": "ok",
+        "device_id": device_id,
+        "reading": reading,
+    }
+
+
+@app.get("/api/telemetry", tags=["Telemetry"])
+@app.get("/telemetry", tags=["Telemetry"])
+def get_telemetry_history(
+    device_id: str = Query(..., min_length=1, max_length=64),
+    limit: int = Query(50, ge=1, le=500),
+    user: Dict[str, Any] = Depends(verify_firebase_operator),
+    repo: RealtimeDatabaseTelemetryRepository = Depends(get_telemetry_repository),
+) -> Dict[str, Any]:
+    """Retrieve bounded telemetry history for a device, ordered newest-first."""
+    readings = repo.get_history(device_id, limit=limit)
+    return {
+        "status": "ok",
+        "device_id": device_id,
+        "count": len(readings),
+        "readings": readings,
+    }
+
+
+# ============================================================================
+# Telemetry ML Inference (/predict)
+# ============================================================================
+_rf_model = None
+_rf_model_loaded = False
+
+
+def _get_rf_model():
+    global _rf_model, _rf_model_loaded
+    if not _rf_model_loaded:
+        candidates = [
+            Path(__file__).parent.parent / "models" / "railsafe_rf_model.pkl",
+            Path(__file__).parent.parent.parent / "railsafe_rf_model.pkl",
+            Path("models/railsafe_rf_model.pkl"),
+            Path("railsafe_rf_model.pkl"),
+        ]
+        for p in candidates:
+            if p.is_file():
+                try:
+                    import pickle
+                    with open(p, "rb") as f:
+                        _rf_model = pickle.load(f)
+                    _rf_model_loaded = True
+                    logger.info("Loaded Random Forest model from %s", p)
+                    break
+                except Exception as e:
+                    logger.warning("Failed to load model from %s: %s", p, e)
+        if not _rf_model_loaded:
+            _rf_model_loaded = True
+    return _rf_model
+
+
+@app.post("/predict", tags=["Inference"])
+@app.post("/api/predict", tags=["Inference"])
+async def predict_telemetry(
+    request: Request,
+    user: Dict[str, Any] = Depends(verify_firebase_operator),
+) -> Dict[str, Any]:
+    """Run ML Random Forest prediction on physical sensor telemetry peaks.
+    
+    Protected by operator Firebase ID token.
+    """
+    try:
+        body = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {e}")
+
+    device_id = str(body.get("deviceId") or body.get("device_id") or "UNKNOWN")
+    sequence = int(body.get("sequence") or 0)
+    sensors = body.get("sensors") or {}
+
+    try:
+        mq2 = float(sensors.get("mq2_raw") or sensors.get("mq2") or sensors.get("sensor_1") or 0.0)
+        mq4 = float(sensors.get("mq4_raw") or sensors.get("mq4") or sensors.get("sensor_2") or 0.0)
+        mq7 = float(sensors.get("mq7_raw") or sensors.get("mq7") or sensors.get("sensor_3") or 0.0)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid numeric sensor values: {e}")
+
+    model = _get_rf_model()
+    if model is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Machine learning model is not ready or failed to initialize.",
+        )
+
+    import pandas as pd
+    import numpy as np
+
+    feature_df = pd.DataFrame(
+        [[mq2, mq4, mq7]],
+        columns=["mq2_raw", "mq4_raw", "mq7_raw"],
+        dtype=np.float64,
+    )
+    probs = model.predict_proba(feature_df)[0]
+    anomaly_prob = float(probs[0])
+    normal_prob = float(probs[1])
+
+    is_anomaly = anomaly_prob >= 0.5
+    prediction = "anomaly" if is_anomaly else "nominal"
+    raw_label = "anomaly_synthetic" if is_anomaly else "normal_synthetic"
+    confidence = float(max(anomaly_prob, normal_prob) * 100.0)
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return {
+        "deviceId": device_id,
+        "sequence": sequence,
+        "prediction": prediction,
+        "label": raw_label,
+        "anomalyScore": round(anomaly_prob, 4),
+        "normalScore": round(normal_prob, 4),
+        "confidence": round(confidence, 1),
+        "reviewRequired": is_anomaly,
+        "modelVersion": "1.0.0",
+        "inferenceTimestamp": now_iso,
+        "inputFeatures": {"mq2_raw": mq2, "mq4_raw": mq4, "mq7_raw": mq7},
+        "userId": user.get("uid", "operator"),
+    }
 
 
 # ============================================================================

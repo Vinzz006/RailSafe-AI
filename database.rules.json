@@ -11,6 +11,19 @@
       "event_uid_index": {
         ".read": false,
         ".write": false
+      },
+      "telemetry": {
+        "$device_id": {
+          ".read": false,
+          ".write": false,
+          ".indexOn": ["server_received_at_ms", "sequence"]
+        }
+      },
+      "telemetry_latest": {
+        "$device_id": {
+          ".read": false,
+          ".write": false
+        }
       }
     }
   }

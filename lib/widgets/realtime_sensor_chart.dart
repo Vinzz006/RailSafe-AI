@@ -65,18 +65,29 @@ class RealtimeSensorChart extends StatelessWidget {
         ? readings.sublist(readings.length - 30)
         : readings;
 
+    final hasMq = displayData.any((r) => r.isHardwareMode || r.sensors.containsKey('mq2_raw'));
+    final s1Label = hasMq ? "MQ-2" : "S1 (VOC)";
+    final s2Label = hasMq ? "MQ-4" : "S2 (Diff)";
+    final s3Label = hasMq ? "MQ-7 (CO)" : "S3 (CO)";
+
     final s1Spots = <FlSpot>[];
     final s2Spots = <FlSpot>[];
+    final s3Spots = <FlSpot>[];
 
     double maxY = 100.0;
 
     for (int i = 0; i < displayData.length; i++) {
       final r = displayData[i];
-      final s1Val = r.sensor1Value ?? 0.0;
-      final s2Val = r.sensor2Value ?? 0.0;
+      final s1Val = r.mq2Value ?? r.sensor1Value ?? 0.0;
+      final s2Val = r.mq4Value ?? r.sensor2Value ?? 0.0;
+      final s3Val = r.mq7Value ?? r.sensor3Value;
 
       s1Spots.add(FlSpot(i.toDouble(), s1Val));
       s2Spots.add(FlSpot(i.toDouble(), s2Val));
+      if (s3Val != null) {
+        s3Spots.add(FlSpot(i.toDouble(), s3Val));
+        if (s3Val > maxY) maxY = s3Val * 1.15;
+      }
 
       if (s1Val > maxY) maxY = s1Val * 1.15;
       if (s2Val > maxY) maxY = s2Val * 1.15;
@@ -119,9 +130,13 @@ class RealtimeSensorChart extends StatelessWidget {
               ),
               Row(
                 children: [
-                  _buildLegendIndicator("S1 (VOC)", AppColors.primaryCyan),
-                  const SizedBox(width: 14),
-                  _buildLegendIndicator("S2 (Diff)", AppColors.accentTeal),
+                  _buildLegendIndicator(s1Label, AppColors.primaryCyan),
+                  const SizedBox(width: 10),
+                  _buildLegendIndicator(s2Label, AppColors.accentTeal),
+                  if (s3Spots.isNotEmpty || hasMq) ...[
+                    const SizedBox(width: 10),
+                    _buildLegendIndicator(s3Label, AppColors.statusWarning),
+                  ],
                 ],
               ),
             ],
@@ -224,6 +239,27 @@ class RealtimeSensorChart extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (s3Spots.isNotEmpty)
+                    LineChartBarData(
+                      spots: s3Spots,
+                      isCurved: true,
+                      curveSmoothness: 0.25,
+                      color: AppColors.statusWarning,
+                      barWidth: 2.0,
+                      isStrokeCapRound: true,
+                      dotData: const FlDotData(show: false),
+                      belowBarData: BarAreaData(
+                        show: true,
+                        gradient: LinearGradient(
+                          colors: [
+                            AppColors.statusWarning.withValues(alpha: 0.15),
+                            AppColors.statusWarning.withValues(alpha: 0.0),
+                          ],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),

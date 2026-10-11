@@ -317,6 +317,17 @@ class BleService {
           }
         }
       }
+
+      // Guard against unbounded buffer growth if corrupted data streams continuously without delimiter
+      if (_packetBuffer.length > 2048) {
+        _log("Warning: BLE packet buffer exceeded 2048 characters without delimiter; pruning.");
+        final currentStr = _packetBuffer.toString();
+        _packetBuffer.clear();
+        final lastOpenBrace = currentStr.lastIndexOf('{');
+        if (lastOpenBrace != -1 && (currentStr.length - lastOpenBrace) < 512) {
+          _packetBuffer.write(currentStr.substring(lastOpenBrace));
+        }
+      }
     } catch (e) {
       _log("Error handling BLE bytes: $e");
     }

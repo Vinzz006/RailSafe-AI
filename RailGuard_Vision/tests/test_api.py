@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.api as api_module
-from app.api import app, get_repository
+from app.api import app, get_repository, get_telemetry_repository
 from src.config import FirebaseConfig, SystemConfig
 
 
@@ -104,24 +104,89 @@ class MockRealtimeDatabaseRepository:
 MockFirestoreRepository = MockRealtimeDatabaseRepository
 
 
+class MockRealtimeDatabaseTelemetryRepository:
+    """Deterministic in-memory repository for telemetry testing."""
+
+    def __init__(self) -> None:
+        self.history: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.latest: Dict[str, Dict[str, Any]] = {}
+        self.is_ready = True
+
+    def check_readiness(self) -> bool:
+        return self.is_ready
+
+    def ingest_reading(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        raw_device_id = raw_data.get("deviceId") or raw_data.get("device_id")
+        if not raw_device_id:
+            raise ValueError("device_id required")
+        device_id = str(raw_device_id).strip()
+        sequence = int(raw_data.get("sequence", 0))
+        from src.telemetry_repository import normalize_sensor_channels
+        sensors = normalize_sensor_channels(raw_data.get("sensors") or {})
+        mode = str(raw_data.get("mode") or "hardware").lower()
+        missing: List[str] = []
+        if mode == "hardware":
+            for req in ("mq2_raw", "mq4_raw", "mq7_raw"):
+                if req not in sensors and req.replace("_raw", "") not in sensors:
+                    missing.append(req)
+
+        payload = {
+            "id": f"seq_{sequence:08d}_1791676800000",
+            "device_id": device_id,
+            "sequence": sequence,
+            "mode": mode,
+            "sensors": sensors,
+            "status": "ok" if not missing else "missing_telemetry",
+            "missing_channels": missing,
+            "server_received_at": "2026-10-11T00:00:00Z",
+            "server_received_at_ms": 1791676800000 + sequence,
+        }
+        if device_id not in self.history:
+            self.history[device_id] = {}
+        self.history[device_id][payload["id"]] = payload
+
+        curr = self.latest.get(device_id)
+        if curr is None or sequence >= int(curr.get("sequence", -1)):
+            self.latest[device_id] = payload
+        return payload
+
+    def ingest_batch(self, readings_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not readings_list:
+            raise ValueError("readings required")
+        if len(readings_list) > 100:
+            raise ValueError("Batch exceeds maximum size of 100 frames.")
+        return [self.ingest_reading(r) for r in readings_list]
+
+    def get_latest_reading(self, device_id: str) -> Optional[Dict[str, Any]]:
+        return self.latest.get(device_id)
+
+    def get_history(self, device_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        dev_hist = list(self.history.get(device_id, {}).values())
+        dev_hist.sort(key=lambda x: x["sequence"], reverse=True)
+        return dev_hist[:limit]
+
+
 @pytest.fixture
 def test_env() -> Generator[dict, None, None]:
-    """Provide isolated test environment with mock Realtime Database repository and test credentials."""
+    """Provide isolated test environment with mock Realtime Database repositories and test credentials."""
     mock_repo = MockRealtimeDatabaseRepository()
+    mock_telemetry_repo = MockRealtimeDatabaseTelemetryRepository()
 
     # Configure API module
     api_module.config.firebase.allow_dev_auth_bypass = True
     api_module.config.security.agent_token = "test-agent-token"
     api_module.config.security.api_token = "test-operator-token"
 
-    # Dependency override for Realtime Database repository
+    # Dependency override for Realtime Database repositories
     app.dependency_overrides[get_repository] = lambda: mock_repo
+    app.dependency_overrides[get_telemetry_repository] = lambda: mock_telemetry_repo
 
     client = TestClient(app)
 
     yield {
         "client": client,
         "repo": mock_repo,
+        "telemetry_repo": mock_telemetry_repo,
         "agent_token": "test-agent-token",
         "operator_token": "test-operator-token",
     }
@@ -162,6 +227,7 @@ def test_readiness_check_healthy_and_unhealthy(test_env: dict) -> None:
     """Verify GET /ready correctly handles healthy and unhealthy Realtime Database dependencies."""
     client: TestClient = test_env["client"]
     repo: MockRealtimeDatabaseRepository = test_env["repo"]
+    telemetry_repo: MockRealtimeDatabaseTelemetryRepository = test_env["telemetry_repo"]
 
     # 1. Healthy state -> 200 OK without requiring authentication
     res = client.get("/ready")
@@ -170,14 +236,19 @@ def test_readiness_check_healthy_and_unhealthy(test_env: dict) -> None:
     assert res.json()["rtdb_connected"] is True
     assert "database_url" in res.json()
 
-    # 2. Unhealthy state (simulated RTDB disconnection) -> 503 Service Unavailable
+    # 2. Unhealthy state (simulated RTDB alert disconnection) -> 503 Service Unavailable
     repo.check_readiness = lambda: False
     res_down = client.get("/ready")
     assert res_down.status_code == 503
     assert "unavailable" in res_down.json()["detail"].lower()
-
-    # Restore healthy
     repo.check_readiness = lambda: True
+
+    # 3. Unhealthy state (simulated telemetry disconnection) -> 503 Service Unavailable
+    telemetry_repo.is_ready = False
+    res_down_tel = client.get("/ready")
+    assert res_down_tel.status_code == 503
+    assert "unavailable" in res_down_tel.json()["detail"].lower()
+    telemetry_repo.is_ready = True
 
 
 def test_authentication_enforcement(test_env: dict) -> None:
@@ -604,4 +675,130 @@ def test_alerts_listing_query_parameters(test_env: dict) -> None:
     # Test invalid status returns 400 Bad Request
     res_invalid = client.get("/api/alerts?limit=50&status=bad_status", headers=headers)
     assert res_invalid.status_code == 400
+
+
+# ============================================================================
+# Telemetry API Endpoint Tests
+# ============================================================================
+
+def test_telemetry_ingest_single_authenticated(test_env: dict) -> None:
+    """Verify POST /api/telemetry ingests single reading with Firebase operator auth."""
+    client: TestClient = test_env["client"]
+    operator_token = test_env["operator_token"]
+
+    payload = {
+        "deviceId": "RAILSAFE-ESP32-01",
+        "sequence": 1,
+        "mode": "hardware",
+        "sensors": {
+            "mq2_raw": 1500,
+            "mq4_raw": 900,
+            "mq7_raw": 450,
+        },
+    }
+
+    res = client.post(
+        "/api/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {operator_token}"},
+    )
+    assert res.status_code == 201
+    data = res.json()
+    assert data["status"] == "ok"
+    assert data["reading"]["device_id"] == "RAILSAFE-ESP32-01"
+    assert data["reading"]["sequence"] == 1
+    assert data["reading"]["sensors"]["mq2_raw"]["value"] == 1500.0
+
+
+def test_telemetry_ingest_batch(test_env: dict) -> None:
+    """Verify POST /api/telemetry ingests batch of readings."""
+    client: TestClient = test_env["client"]
+    operator_token = test_env["operator_token"]
+
+    batch_payload = {
+        "readings": [
+            {
+                "deviceId": "RAILSAFE-ESP32-01",
+                "sequence": 2,
+                "mode": "hardware",
+                "sensors": {"mq2_raw": 1600, "mq4_raw": 950, "mq7_raw": 470},
+            },
+            {
+                "deviceId": "RAILSAFE-ESP32-01",
+                "sequence": 3,
+                "mode": "hardware",
+                "sensors": {"mq2_raw": 1650, "mq4_raw": 980, "mq7_raw": 480},
+            },
+        ]
+    }
+
+    res = client.post(
+        "/api/telemetry",
+        json=batch_payload,
+        headers={"Authorization": f"Bearer {operator_token}"},
+    )
+    assert res.status_code == 201
+    data = res.json()
+    assert data["status"] == "ok"
+    assert data["count"] == 2
+    assert len(data["readings"]) == 2
+
+
+def test_telemetry_retrieval_latest_and_history(test_env: dict) -> None:
+    """Verify GET /api/telemetry/latest and GET /api/telemetry history."""
+    client: TestClient = test_env["client"]
+    operator_token = test_env["operator_token"]
+    headers = {"Authorization": f"Bearer {operator_token}"}
+
+    # Ingest a reading first
+    client.post(
+        "/api/telemetry",
+        json={
+            "deviceId": "RAILSAFE-ESP32-TEST",
+            "sequence": 42,
+            "mode": "hardware",
+            "sensors": {"mq2_raw": 2100, "mq4_raw": 1100, "mq7_raw": 600},
+        },
+        headers=headers,
+    )
+
+    # Latest retrieval
+    res_latest = client.get("/api/telemetry/latest?device_id=RAILSAFE-ESP32-TEST", headers=headers)
+    assert res_latest.status_code == 200
+    latest_data = res_latest.json()
+    assert latest_data["device_id"] == "RAILSAFE-ESP32-TEST"
+    assert latest_data["reading"]["sequence"] == 42
+    assert latest_data["reading"]["sensors"]["mq2_raw"]["value"] == 2100.0
+
+    # History retrieval
+    res_hist = client.get("/api/telemetry?device_id=RAILSAFE-ESP32-TEST&limit=10", headers=headers)
+    assert res_hist.status_code == 200
+    hist_body = res_hist.json()
+    assert hist_body["count"] >= 1
+    assert hist_body["readings"][0]["device_id"] == "RAILSAFE-ESP32-TEST"
+
+
+def test_telemetry_authentication_rejections(test_env: dict) -> None:
+    """Verify telemetry endpoints reject missing tokens or camera agent tokens."""
+    client: TestClient = test_env["client"]
+    agent_token = test_env["agent_token"]
+
+    payload = {"deviceId": "DEV-01", "sequence": 1, "sensors": {"mq2_raw": 500}}
+
+    # 1. Missing token -> 401
+    res_no_auth = client.post("/api/telemetry", json=payload)
+    assert res_no_auth.status_code == 401
+
+    # 2. Camera agent token -> 401 (Agent token cannot write mobile operator telemetry)
+    res_agent_auth = client.post(
+        "/api/telemetry",
+        json=payload,
+        headers={"Authorization": f"Bearer {agent_token}"},
+    )
+    assert res_agent_auth.status_code == 401
+
+    # 3. History without token -> 401
+    res_hist_no_auth = client.get("/api/telemetry?device_id=DEV-01")
+    assert res_hist_no_auth.status_code == 401
+
 

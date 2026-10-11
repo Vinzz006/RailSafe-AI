@@ -18,6 +18,7 @@ import 'services/local_storage_service.dart';
 import 'services/prediction_api_service.dart';
 import 'services/railguard_api_service.dart';
 import 'services/simulation_service.dart';
+import 'services/telemetry_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -58,6 +59,13 @@ void main() async {
     storageService,
     authService: authService,
   );
+  final telemetryService = TelemetryService(
+    storageService,
+    authService: authService,
+  );
+  final telemetryQueue = TelemetrySyncQueue(
+    telemetryService: telemetryService,
+  );
 
   // Initialize core application providers
   final alertsProvider = AlertsProvider(storageService, firestoreService);
@@ -69,6 +77,7 @@ void main() async {
     alertsProvider,
     predictionApiService,
     authService,
+    telemetryQueue: telemetryQueue,
   );
   final authProvider = AuthProvider(authService, firestoreService);
   final bleProvider = BleProvider(bleService);
@@ -83,6 +92,8 @@ void main() async {
     MultiProvider(
       providers: [
         Provider<RailGuardApiService>.value(value: railGuardApiService),
+        Provider<TelemetryService>.value(value: telemetryService),
+        Provider<TelemetrySyncQueue>.value(value: telemetryQueue),
         ChangeNotifierProvider.value(value: authProvider),
         ChangeNotifierProvider.value(value: bleProvider),
         ChangeNotifierProvider.value(value: settingsProvider),

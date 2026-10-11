@@ -14,6 +14,7 @@ import '../services/firestore_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/prediction_api_service.dart';
 import '../services/simulation_service.dart';
+import '../services/telemetry_service.dart';
 import 'alerts_provider.dart';
 
 class TestProvider extends ChangeNotifier {
@@ -24,6 +25,7 @@ class TestProvider extends ChangeNotifier {
   final AlertsProvider _alertsProvider;
   final PredictionApiService _predictionApi;
   final AuthService _authService;
+  final TelemetrySyncQueue? telemetryQueue;
 
   bool _isTesting = false;
   String _testMode = 'hardware'; // 'hardware' or 'demo'
@@ -57,10 +59,12 @@ class TestProvider extends ChangeNotifier {
     this._firestore,
     this._alertsProvider,
     this._predictionApi,
-    this._authService,
-  ) {
+    this._authService, {
+    this.telemetryQueue,
+  }) {
     _loadSavedTests();
     _listenToBleStatus();
+    _listenToBleReadings();
   }
 
   bool get isTesting => _isTesting;
@@ -89,6 +93,15 @@ class TestProvider extends ChangeNotifier {
       // If hardware disconnects during an active hardware test, handle interruption
       if (_isTesting && _testMode == 'hardware' && status == BleStatus.disconnected) {
         _handleTestInterruption("Hardware peripheral disconnected during active test.");
+      }
+    });
+  }
+
+  void _listenToBleReadings() {
+    _bleReadingSub?.cancel();
+    _bleReadingSub = _bleService.readingStream.listen((reading) {
+      if (_testMode != 'demo') {
+        _onNewReading(reading);
       }
     });
   }
@@ -142,13 +155,11 @@ class TestProvider extends ChangeNotifier {
         return false;
       }
 
+      // Ensure active BLE stream listener
+      _listenToBleReadings();
+
       // Try sending start command to ESP32 firmware if supported
       await _bleService.sendCommand(BleConstants.cmdStartTest);
-
-      _bleReadingSub?.cancel();
-      _bleReadingSub = _bleService.readingStream.listen((reading) {
-        _onNewReading(reading);
-      });
 
       await _alertsProvider.addAlert(
         type: "hardware_test_started",
@@ -165,9 +176,12 @@ class TestProvider extends ChangeNotifier {
   }
 
   void _onNewReading(SensorReading reading) {
-    if (!_isTesting) return;
     _latestReading = reading;
-    _currentSessionReadings.add(reading);
+    if (_isTesting) {
+      _currentSessionReadings.add(reading);
+      // Asynchronously enqueue into bounded background sync queue without blocking UI or BLE
+      telemetryQueue?.enqueue(reading);
+    }
     notifyListeners();
   }
 
@@ -182,8 +196,8 @@ class TestProvider extends ChangeNotifier {
       _simReadingSub?.cancel();
       _simulationService.stopSimulation();
     } else {
-      _bleReadingSub?.cancel();
       await _bleService.sendCommand(BleConstants.cmdStopTest);
+      // Do not cancel _bleReadingSub here: preserve live standby readings for the UI
     }
 
     final completedAt = DateTime.now();

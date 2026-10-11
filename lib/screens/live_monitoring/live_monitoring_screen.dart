@@ -7,6 +7,7 @@ import '../../providers/auth_provider.dart';
 import '../../providers/ble_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/test_provider.dart';
+import '../../services/telemetry_service.dart';
 import '../../widgets/custom_button.dart';
 import '../../widgets/realtime_sensor_chart.dart';
 import '../../widgets/sensor_gauge_card.dart';
@@ -29,19 +30,25 @@ class LiveMonitoringScreen extends StatelessWidget {
     final latest = testProv.latestReading;
     final isTesting = testProv.isTesting;
 
-    // Calculate peaks for active session
+    // Calculate peaks & averages across current session readings
     double? s1Peak;
     double? s2Peak;
+    double? s3Peak;
     double? s1Avg;
     double? s2Avg;
+    double? s3Avg;
 
     if (testProv.currentSessionReadings.isNotEmpty) {
       final s1List = testProv.currentSessionReadings
-          .map((r) => r.sensor1Value)
+          .map((r) => r.mq2Value ?? r.sensor1Value)
           .whereType<double>()
           .toList();
       final s2List = testProv.currentSessionReadings
-          .map((r) => r.sensor2Value)
+          .map((r) => r.mq4Value ?? r.sensor2Value)
+          .whereType<double>()
+          .toList();
+      final s3List = testProv.currentSessionReadings
+          .map((r) => r.mq7Value ?? r.sensor3Value)
           .whereType<double>()
           .toList();
 
@@ -53,7 +60,14 @@ class LiveMonitoringScreen extends StatelessWidget {
         s2Peak = s2List.reduce((a, b) => a > b ? a : b);
         s2Avg = s2List.reduce((a, b) => a + b) / s2List.length;
       }
+      if (s3List.isNotEmpty) {
+        s3Peak = s3List.reduce((a, b) => a > b ? a : b);
+        s3Avg = s3List.reduce((a, b) => a + b) / s3List.length;
+      }
     }
+
+    final hasMissingChannels = !isDemo && latest != null && latest.hasMissingTelemetry;
+    final isStale = !isDemo && ble.hasStaleData;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -87,7 +101,7 @@ class LiveMonitoringScreen extends StatelessWidget {
               // DEMO MODE BANNER (Mandatory, persistent & unmistakable when active)
               if (isDemo)
                 Container(
-                  margin: const EdgeInsets.only(bottom: 14),
+                  margin: const EdgeInsets.only(bottom: 12),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: AppColors.statusWarning.withValues(alpha: 0.15),
@@ -123,6 +137,82 @@ class LiveMonitoringScreen extends StatelessWidget {
                               ),
                             ),
                           ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+              // MISSING TELEMETRY WARNING (Physical Mode)
+              if (hasMissingChannels)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.statusDanger.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: AppColors.statusDanger.withValues(alpha: 0.8),
+                      width: 1.5,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.error_outline_rounded,
+                          color: AppColors.statusDanger, size: 22),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "HARDWARE TELEMETRY INCOMPLETE",
+                              style: GoogleFonts.inter(
+                                color: AppColors.statusDanger,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            Text(
+                              "Missing channel(s): ${latest.missingChannels.join(', ')}. Values are not fabricated.",
+                              style: GoogleFonts.inter(
+                                color: AppColors.textPrimary,
+                                fontSize: 11.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+              // STALE TELEMETRY WARNING
+              if (isStale)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.statusWarning.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: AppColors.statusWarning.withValues(alpha: 0.8),
+                      width: 1.5,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.access_time_filled_rounded,
+                          color: AppColors.statusWarning, size: 22),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          "Telemetry Stale: No packet received for >5s from ESP32. Check peripheral link.",
+                          style: GoogleFonts.inter(
+                            color: AppColors.textPrimary,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ],
@@ -168,7 +258,7 @@ class LiveMonitoringScreen extends StatelessWidget {
                             Text(
                               isTesting
                                   ? (isDemo ? "SIMULATION SAMPLING ACTIVE" : "LIVE BLE SAMPLING ACTIVE")
-                                  : "STANDBY READY",
+                                  : (ble.isConnected ? "BLE MONITORING (STANDBY)" : "STANDBY READY"),
                               style: GoogleFonts.orbitron(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w700,
@@ -220,77 +310,100 @@ class LiveMonitoringScreen extends StatelessWidget {
               RealtimeSensorChart(
                 readings: testProv.currentSessionReadings,
                 isDemo: isDemo,
-                isLive: isTesting,
+                isLive: isTesting || ble.isConnected,
               ),
 
               const SizedBox(height: 14),
 
-              // Sensor Gauges Grid
+              // Sensor Gauges Grid (All 3 Channels)
               Row(
                 children: [
                   Expanded(
                     child: SensorGaugeCard(
-                      title: "Sensor 1 (VOC/Aerosol)",
-                      channelKey: "sensor_1",
-                      currentValue: latest?.sensor1Value,
-                      unit: latest?.sensors['sensor_1']?.unit ?? "raw",
-                      warningThreshold: 280.0,
-                      maxGaugeValue: 500.0,
+                      title: isDemo ? "Sensor 1 (VOC)" : "MQ-2 (Gas/Smoke)",
+                      channelKey: isDemo ? "sensor_1" : "mq2_raw",
+                      currentValue: isDemo ? latest?.sensor1Value : latest?.mq2Value,
+                      unit: isDemo ? "raw" : "ADC count",
+                      warningThreshold: isDemo ? 280.0 : 2500.0,
+                      maxGaugeValue: isDemo ? 500.0 : 4095.0,
                       sessionPeak: s1Peak,
                       sessionAvg: s1Avg,
-                      isStale: !isDemo && ble.hasStaleData,
+                      isStale: isStale,
                       primaryColor: AppColors.primaryCyan,
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: SensorGaugeCard(
-                      title: "Sensor 2 (Differential)",
-                      channelKey: "sensor_2",
-                      currentValue: latest?.sensor2Value,
-                      unit: latest?.sensors['sensor_2']?.unit ?? "raw",
-                      warningThreshold: 140.0,
-                      maxGaugeValue: 250.0,
+                      title: isDemo ? "Sensor 2 (Diff)" : "MQ-4 (Methane)",
+                      channelKey: isDemo ? "sensor_2" : "mq4_raw",
+                      currentValue: isDemo ? latest?.sensor2Value : latest?.mq4Value,
+                      unit: isDemo ? "raw" : "ADC count",
+                      warningThreshold: isDemo ? 140.0 : 2000.0,
+                      maxGaugeValue: isDemo ? 250.0 : 4095.0,
                       sessionPeak: s2Peak,
                       sessionAvg: s2Avg,
-                      isStale: !isDemo && ble.hasStaleData,
+                      isStale: isStale,
                       primaryColor: AppColors.accentTeal,
                     ),
                   ),
                 ],
               ),
+              const SizedBox(height: 10),
+              SensorGaugeCard(
+                title: isDemo ? "Sensor 3 (CO Reference)" : "MQ-7 (Carbon Monoxide)",
+                channelKey: isDemo ? "sensor_3" : "mq7_raw",
+                currentValue: isDemo ? latest?.sensor3Value : latest?.mq7Value,
+                unit: isDemo ? "raw" : "ADC count",
+                warningThreshold: isDemo ? 180.0 : 1800.0,
+                maxGaugeValue: isDemo ? 300.0 : 4095.0,
+                sessionPeak: s3Peak,
+                sessionAvg: s3Avg,
+                isStale: isStale,
+                primaryColor: AppColors.statusWarning,
+              ),
 
               const SizedBox(height: 14),
 
-              // Packet Metadata Bar
+              // Packet Metadata Bar & Cloud Sync State
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: BoxDecoration(
                   color: AppColors.surface,
                   borderRadius: BorderRadius.circular(10),
                   border: Border.all(color: AppColors.surfaceBorder),
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                child: Column(
                   children: [
-                    Text(
-                      latest != null
-                          ? "Packet #${latest.sequence} • Status: ${latest.status}"
-                          : "Packets Received: ${testProv.currentSessionReadings.length}",
-                      style: GoogleFonts.inter(
-                        color: AppColors.textSecondary,
-                        fontSize: 11.5,
-                      ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          latest != null
+                              ? "Packet #${latest.sequence} • Mode: ${latest.mode.toUpperCase()}"
+                              : "Packets: ${testProv.currentSessionReadings.length}",
+                          style: GoogleFonts.inter(
+                            color: AppColors.textSecondary,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          latest != null
+                              ? DateFormatter.formatCompactTime(latest.timestamp)
+                              : "--:--:--",
+                          style: GoogleFonts.inter(
+                            color: AppColors.textMuted,
+                            fontSize: 11.5,
+                          ),
+                        ),
+                      ],
                     ),
-                    Text(
-                      latest != null
-                          ? DateFormatter.formatCompactTime(latest.timestamp)
-                          : "--:--:--",
-                      style: GoogleFonts.inter(
-                        color: AppColors.textMuted,
-                        fontSize: 11.5,
-                      ),
-                    ),
+                    const SizedBox(height: 8),
+                    const Divider(height: 1, color: AppColors.surfaceBorder),
+                    const SizedBox(height: 8),
+                    // Cloud Sync Status Row
+                    _buildCloudSyncStatusRow(testProv.telemetryQueue),
                   ],
                 ),
               ),
@@ -359,6 +472,98 @@ class LiveMonitoringScreen extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildCloudSyncStatusRow(TelemetrySyncQueue? queue) {
+    if (queue == null) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            "Cloud Sync: Local Standby",
+            style: GoogleFonts.inter(color: AppColors.textMuted, fontSize: 11),
+          ),
+          const Icon(Icons.cloud_queue_rounded, size: 14, color: AppColors.textMuted),
+        ],
+      );
+    }
+
+    return StreamBuilder<TelemetrySyncState>(
+      stream: queue.stateStream,
+      initialData: queue.currentState,
+      builder: (context, snapshot) {
+        final state = snapshot.data ?? queue.currentState;
+
+        Color statusColor = AppColors.textMuted;
+        String statusText = "Cloud Idle";
+        IconData statusIcon = Icons.cloud_done_rounded;
+
+        switch (state.status) {
+          case TelemetrySyncStatus.syncing:
+            statusColor = AppColors.primaryCyan;
+            statusText = "Syncing with Render (${state.queuedCount} queued)...";
+            statusIcon = Icons.cloud_sync_rounded;
+            break;
+          case TelemetrySyncStatus.synced:
+            statusColor = AppColors.statusSafe;
+            statusText = "Render RTDB Synced (${state.totalSyncedCount} frames)";
+            statusIcon = Icons.cloud_done_rounded;
+            break;
+          case TelemetrySyncStatus.offlineQueued:
+            statusColor = AppColors.statusWarning;
+            statusText = "Offline Queued (${state.queuedCount} pending)";
+            statusIcon = Icons.cloud_off_rounded;
+            break;
+          case TelemetrySyncStatus.error:
+            statusColor = AppColors.statusDanger;
+            statusText = "Sync Error (${state.queuedCount} queued)";
+            statusIcon = Icons.error_outline_rounded;
+            break;
+          case TelemetrySyncStatus.idle:
+            statusColor = AppColors.textSecondary;
+            statusText = state.totalSyncedCount > 0
+                ? "Synced (${state.totalSyncedCount} frames)"
+                : "Cloud Sync Ready";
+            statusIcon = Icons.cloud_queue_rounded;
+            break;
+        }
+
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              children: [
+                Icon(statusIcon, size: 14, color: statusColor),
+                const SizedBox(width: 6),
+                Text(
+                  statusText,
+                  style: GoogleFonts.inter(
+                    color: statusColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            if (state.isOffline || state.hasError)
+              InkWell(
+                onTap: () => queue.retryNow(),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  child: Text(
+                    "Retry",
+                    style: GoogleFonts.inter(
+                      color: AppColors.primaryCyan,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }
